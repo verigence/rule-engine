@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend — lint, typecheck, test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Determine changed Python files
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+
+          if [[ -z "$base" || "$base" == "0000000000000000000000000000000000000000" ]]; then
+            find backend/src backend/tests -type f -name '*.py' | sed 's#^backend/##' | sort > /tmp/changed-python-files.txt
+          else
+            git diff --name-only --diff-filter=ACMRT "$base"...HEAD -- backend/src backend/tests \
+              | grep -E '^backend/(src|tests)/.*\.py$' \
+              | sed 's#^backend/##' \
+              | sort -u > /tmp/changed-python-files.txt || true
+          fi
+
+          echo 'Python files changed in this revision:'
+          cat /tmp/changed-python-files.txt || true
+
+      - name: Lint changed Python files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < /tmp/changed-python-files.txt
+          if (( ${#files[@]} == 0 )); then
+            echo 'No changed Python files to lint.'
+            exit 0
+          fi
+          ruff check "${files[@]}"
+
+      - name: Type check changed source files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(grep '^src/.*\.py$' /tmp/changed-python-files.txt || true)
+          if (( ${#files[@]} == 0 )); then
+            echo 'No changed source files to type check.'
+            exit 0
+          fi
+          mypy "${files[@]}"
+
+      - name: Run tests
+        env:
+          AUDIT_SECRET_KEY: "ci-test-secret-key-32-chars-minimum"
+          AUDIT_WEBHOOK_SECRET: "ci-test-webhook-secret-32-chars-ok"
+          AUDIT_SECURITY_JWKS_URL: "http://localhost/mock-jwks"
+          AUDIT_ENV: "dev"
+        run: pytest --tb=short
