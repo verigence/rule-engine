@@ -1,7 +1,7 @@
 """internal.py — Internal webhook from verigence-di.
 
 POST /internal/trigger
-  • Validates X-Webhook-Secret header
+  • Validates X-Webhook-Secret header (no JWT — server-to-server)
   • Returns 202 Accepted immediately
   • Fires incremental audit as asyncio background task
 """
@@ -12,9 +12,8 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from verigence.audit.application.evaluator import load_rules, run_audit
 from verigence.audit.repositories.audit_findings import persist_findings
@@ -43,7 +42,6 @@ async def _run_incremental(
     """
     try:
         async with di_session_ctx() as di_session, audit_session_ctx() as audit_session:
-            # Load only rules that touch this document type
             all_rules = await load_rules(audit_session, scope="WITHIN_CASE")
             relevant = [
                 r for r in all_rules
@@ -66,14 +64,12 @@ async def _run_incremental(
                 trigger_mode="EVENT_DRIVEN",
                 newly_confirmed_doc=doc_type_key,
             )
-
             summary = await run_audit(
                 di_session, audit_session,
                 tenant_id=tenant_id,
                 subject_id=UUID(subject_id),
             )
             summary.audit_run_id = run_id
-
             await persist_findings(
                 audit_session,
                 tenant_id=tenant_id,
@@ -83,7 +79,6 @@ async def _run_incremental(
                 scope="WITHIN_CASE",
             )
             await complete_run(audit_session, run_id, summary)
-
             logger.info(
                 "webhook_audit_complete",
                 tenant_id=tenant_id,
@@ -106,9 +101,10 @@ async def trigger_webhook(
     body: WebhookPayload,
     request: Request,
 ) -> dict[str, Any]:
-    """Receive a fire-and-forget event from verigence-di and schedule evaluation."""
+    """Receive event from verigence-di and schedule incremental evaluation."""
     settings = get_settings()
-    if request.headers.get("X-Webhook-Secret") != settings.webhook_secret:
+    secret   = settings.webhook_secret
+    if secret and request.headers.get("X-Webhook-Secret") != secret:
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
     asyncio.create_task(

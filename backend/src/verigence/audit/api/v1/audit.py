@@ -6,11 +6,13 @@ Group C  — Findings query, summary, readiness (4 routes)
 Group D  — Cross-case scan + findings (2 routes)
 Group E  — Acknowledgement (3 routes)
 Group F  — Rule management (4 routes, including re-evaluate)
+
+All routes require a valid Bearer JWT (see auth/jwt.py).
+Tenant in JWT must match tenantId path parameter.
 """
 from __future__ import annotations
 
-import asyncio
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from verigence.audit.api.schemas import ok
 from verigence.audit.application.cross_case_engine import run_cross_case_scan
 from verigence.audit.application.evaluator import run_audit
-from verigence.audit.application.phase_router import run_phase_audit
+from verigence.audit.auth.jwt import Principal, get_principal, require_tenant
 from verigence.audit.repositories.audit_findings import (
     acknowledge_finding,
     bulk_acknowledge,
@@ -40,17 +42,25 @@ from verigence.audit.repositories.database import (
     get_di_session,
 )
 
-router = APIRouter(
-    prefix="/v1/tenants/{tenantId}",
-    tags=["audit"],
-)
+router = APIRouter(prefix="/v1/tenants/{tenantId}", tags=["audit"])
+
+# Reusable type alias for the auth dependency
+Auth = Annotated[Principal, Depends(get_principal)]
 
 
-# ── Request / Response bodies ────────────────────────────────────────────────────────
+# ── Request bodies ────────────────────────────────────────────────────────────────
 
 class PhaseAuditRequest(BaseModel):
     includeSkipped: bool = False
     failFast:       bool = False
+
+class ByCategoryRequest(BaseModel):
+    categories:     list[str]
+    includeSkipped: bool = False
+
+class ByDocumentsRequest(BaseModel):
+    documentIds:    list[str]
+    includeSkipped: bool = False
 
 class AcknowledgeRequest(BaseModel):
     note:  str
@@ -66,7 +76,7 @@ class RuleConfigUpdate(BaseModel):
     enabled:   bool  | None = None
 
 
-# ── Helper: run full audit and persist ──────────────────────────────────────────────
+# ── Internal helper ────────────────────────────────────────────────────────────────
 
 async def _run_and_persist(
     di_session: AsyncSession,
@@ -76,6 +86,7 @@ async def _run_and_persist(
     trigger_mode: str = "ON_DEMAND",
     phases: list[str] | None = None,
 ) -> dict[str, Any]:
+    """Run a full (or phase-filtered) audit, persist results, return API-ready dict."""
     run_id = await create_run(
         audit_session,
         tenant_id=tenant_id,
@@ -85,7 +96,8 @@ async def _run_and_persist(
     )
     summary = await run_audit(
         di_session, audit_session,
-        tenant_id=tenant_id, subject_id=UUID(subject_id),
+        tenant_id=tenant_id,
+        subject_id=UUID(subject_id),
         phases=phases,
     )
     summary.audit_run_id = run_id
@@ -94,7 +106,6 @@ async def _run_and_persist(
     )
     await complete_run(audit_session, run_id, summary)
 
-    fail_findings = [f for f in summary.findings if f.result.value == "FAIL"]
     return {
         "auditRunId": str(run_id),
         "verdict":    summary.verdict,
@@ -109,14 +120,15 @@ async def _run_and_persist(
         },
         "anomalies": [
             {
-                "ruleCode":  f.rule_code,
-                "severity":  f.severity,
-                "category":  f.category,
-                "detail":    f.detail,
-                "leftValue": f.left_value,
-                "rightValue":f.right_value,
+                "ruleCode":   f.rule_code,
+                "severity":   f.severity,
+                "category":   f.category,
+                "detail":     f.detail,
+                "leftValue":  f.left_value,
+                "rightValue": f.right_value,
             }
-            for f in fail_findings
+            for f in summary.findings
+            if f.result.value == "FAIL"
         ],
         "skippedRules": [
             {"ruleCode": rc, "reason": reason}
@@ -125,15 +137,17 @@ async def _run_and_persist(
     }
 
 
-# ── Group A: Phase-scoped evaluation (7 routes) ───────────────────────────────────
+# ── Group A: Phase-scoped evaluation (7 routes) ─────────────────────────────────
 
 @router.post("/subjects/{subjectId}/audit/booking")
 async def audit_booking(
     tenantId: str, subjectId: str,
     body: PhaseAuditRequest,
-    di: AsyncSession = Depends(get_di_session),
+    principal: Auth,
+    di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["BOOKING"])
     return ok({**data, "phase": "BOOKING"})
 
@@ -142,9 +156,11 @@ async def audit_booking(
 async def audit_delivery(
     tenantId: str, subjectId: str,
     body: PhaseAuditRequest,
-    di: AsyncSession = Depends(get_di_session),
+    principal: Auth,
+    di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["DELIVERY"])
     return ok({**data, "phase": "DELIVERY"})
 
@@ -153,9 +169,11 @@ async def audit_delivery(
 async def audit_finance(
     tenantId: str, subjectId: str,
     body: PhaseAuditRequest,
-    di: AsyncSession = Depends(get_di_session),
+    principal: Auth,
+    di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["FINANCE"])
     return ok({**data, "phase": "FINANCE"})
 
@@ -164,9 +182,11 @@ async def audit_finance(
 async def audit_exchange(
     tenantId: str, subjectId: str,
     body: PhaseAuditRequest,
-    di: AsyncSession = Depends(get_di_session),
+    principal: Auth,
+    di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["EXCHANGE"])
     return ok({**data, "phase": "EXCHANGE"})
 
@@ -175,44 +195,38 @@ async def audit_exchange(
 async def audit_corporate(
     tenantId: str, subjectId: str,
     body: PhaseAuditRequest,
-    di: AsyncSession = Depends(get_di_session),
+    principal: Auth,
+    di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["CORPORATE"])
     return ok({**data, "phase": "CORPORATE"})
-
-
-class ByCategoryRequest(BaseModel):
-    categories: list[str]
-    includeSkipped: bool = False
 
 
 @router.post("/subjects/{subjectId}/audit/by-category")
 async def audit_by_category(
     tenantId: str, subjectId: str,
     body: ByCategoryRequest,
-    di: AsyncSession = Depends(get_di_session),
+    principal: Auth,
+    di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId)
-    # Post-filter to requested categories
     data["anomalies"] = [a for a in data["anomalies"] if a["category"] in body.categories]
     return ok({**data, "categories": body.categories})
-
-
-class ByDocumentsRequest(BaseModel):
-    documentIds: list[str]
-    includeSkipped: bool = False
 
 
 @router.post("/subjects/{subjectId}/audit/by-documents")
 async def audit_by_documents(
     tenantId: str, subjectId: str,
     body: ByDocumentsRequest,
-    di: AsyncSession = Depends(get_di_session),
+    principal: Auth,
+    di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
-    # Full audit — the context builder will pick up those confirmed documents
+    require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId)
     return ok(data)
 
@@ -222,9 +236,11 @@ async def audit_by_documents(
 @router.post("/subjects/{subjectId}/audit")
 async def full_audit(
     tenantId: str, subjectId: str,
-    di: AsyncSession = Depends(get_di_session),
+    principal: Auth,
+    di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId)
     return ok(data)
 
@@ -232,8 +248,10 @@ async def full_audit(
 @router.get("/subjects/{subjectId}/audit/runs")
 async def get_audit_runs(
     tenantId: str, subjectId: str,
+    principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     runs = await list_runs(audit, tenantId, subjectId)
     return ok({"runs": runs})
 
@@ -243,10 +261,12 @@ async def get_audit_runs(
 @router.get("/subjects/{subjectId}/audit/findings")
 async def subject_findings(
     tenantId: str, subjectId: str,
-    result: str | None = None,
+    principal: Auth,
+    result:   str | None = None,
     severity: str | None = None,
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     findings = await get_findings(audit, tenantId, subjectId, result=result, severity=severity)
     return ok({"findings": findings})
 
@@ -254,8 +274,10 @@ async def subject_findings(
 @router.get("/subjects/{subjectId}/audit/summary")
 async def subject_summary(
     tenantId: str, subjectId: str,
+    principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     summary = await get_audit_summary(audit, tenantId, subjectId)
     return ok(summary)
 
@@ -263,12 +285,12 @@ async def subject_summary(
 @router.get("/audit/findings")
 async def tenant_findings(
     tenantId: str,
-    result: str | None = None,
+    principal: Auth,
+    result:   str | None = None,
     severity: str | None = None,
-    category: str | None = None,
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
-    # Tenant-wide findings: query all subjects
+    require_tenant(tenantId, principal)
     rows = (
         await audit.execute(
             text("""
@@ -277,7 +299,7 @@ async def tenant_findings(
                        af.acknowledgement_state, af.evaluated_at_utc
                 FROM   audit.audit_findings af
                 JOIN   audit.audit_rules ar ON ar.rule_code = af.rule_code
-                WHERE  af.tenant_id = :tid
+                WHERE  af.tenant_id  = :tid
                   AND  af.is_current = TRUE
                 ORDER  BY af.evaluated_at_utc DESC
                 LIMIT  500
@@ -291,23 +313,23 @@ async def tenant_findings(
 @router.get("/subjects/{subjectId}/audit/readiness")
 async def rule_readiness(
     tenantId: str, subjectId: str,
-    di: AsyncSession = Depends(get_di_session),
+    principal: Auth,
+    di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
-    """Show which rules can be evaluated given current confirmed documents."""
     from verigence.audit.application.context_builder import build_audit_context  # noqa: PLC0415
-    from verigence.audit.application.evaluator import load_rules, evaluate_rule  # noqa: PLC0415
-
+    from verigence.audit.application.evaluator import evaluate_rule, load_rules  # noqa: PLC0415
+    require_tenant(tenantId, principal)
     context = await build_audit_context(di, tenantId, UUID(subjectId))
-    rules = await load_rules(audit, scope="WITHIN_CASE")
-    ready, skipped = [], []
+    rules   = await load_rules(audit, scope="WITHIN_CASE")
+    ready, not_ready = [], []
     for rule in rules:
         finding = evaluate_rule(rule, context)
         if finding.result.value == "SKIPPED":
-            skipped.append({"ruleCode": rule.rule_code, "reason": finding.detail})
+            not_ready.append({"ruleCode": rule.rule_code, "reason": finding.detail})
         else:
             ready.append(rule.rule_code)
-    return ok({"ready": ready, "notReady": skipped})
+    return ok({"ready": ready, "notReady": not_ready})
 
 
 # ── Group D: Cross-case (2 routes) ───────────────────────────────────────────────
@@ -315,13 +337,15 @@ async def rule_readiness(
 @router.post("/audit/cross-case-scan")
 async def cross_case_scan(
     tenantId: str,
-    di: AsyncSession = Depends(get_di_session),
+    principal: Auth,
+    di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     summary = await run_cross_case_scan(di, audit, tenantId)
     return ok({
-        "auditRunId": str(summary.audit_run_id),
-        "verdict":    summary.verdict,
+        "auditRunId":     str(summary.audit_run_id),
+        "verdict":        summary.verdict,
         "duplicatesFound": summary.fail_count,
     })
 
@@ -329,15 +353,16 @@ async def cross_case_scan(
 @router.get("/audit/cross-case-findings")
 async def cross_case_findings(
     tenantId: str,
+    principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     rows = (
         await audit.execute(
             text("""
-                SELECT finding_id, rule_code, detail, affected_subjects,
-                       evaluated_at_utc
+                SELECT finding_id, rule_code, detail, affected_subjects, evaluated_at_utc
                 FROM   audit.audit_findings
-                WHERE  tenant_id  = :tid
+                WHERE  tenant_id   = :tid
                   AND  audit_scope = 'CROSS_CASE'
                   AND  is_current  = TRUE
                 ORDER  BY evaluated_at_utc DESC
@@ -355,11 +380,13 @@ async def cross_case_findings(
 async def ack_finding(
     tenantId: str, findingId: str,
     body: AcknowledgeRequest,
+    principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     await acknowledge_finding(
         audit, tenantId, findingId,
-        actor_id="api-caller",  # JWT actor_id wired in Sub-Task 10
+        actor_id=principal.actor_id,
         note=body.note, waive=body.waive,
     )
     return ok({"acknowledged": True})
@@ -369,11 +396,13 @@ async def ack_finding(
 async def bulk_ack(
     tenantId: str, subjectId: str,
     body: BulkAcknowledgeRequest,
+    principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     await bulk_acknowledge(
         audit, tenantId, body.findingIds,
-        actor_id="api-caller",
+        actor_id=principal.actor_id,
         note=body.note, waive=body.waive,
     )
     return ok({"acknowledged": len(body.findingIds)})
@@ -382,9 +411,11 @@ async def bulk_ack(
 @router.get("/audit/pending-acknowledgements")
 async def pending_acks(
     tenantId: str,
+    principal: Auth,
     severity: str | None = None,
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     findings = await get_pending_acknowledgements(audit, tenantId, severity=severity)
     return ok({"pending": findings})
 
@@ -394,8 +425,10 @@ async def pending_acks(
 @router.get("/audit/rules")
 async def list_audit_rules(
     tenantId: str,
+    principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     rows = (
         await audit.execute(
             text("""
@@ -412,10 +445,10 @@ async def list_audit_rules(
 @router.get("/audit/rule-readiness")
 async def tenant_rule_readiness(
     tenantId: str,
+    principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
-    """Count of subjects per rule that could be evaluated given current confirmed docs."""
-    # Lightweight: return enabled rule metadata only
+    require_tenant(tenantId, principal)
     rows = (
         await audit.execute(
             text("""
@@ -433,8 +466,10 @@ async def tenant_rule_readiness(
 async def update_rule_config(
     tenantId: str, ruleCode: str,
     body: RuleConfigUpdate,
+    principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
+    require_tenant(tenantId, principal)
     if body.threshold is not None:
         await audit.execute(
             text("UPDATE audit.audit_rules SET threshold = :t WHERE rule_code = :rc"),
@@ -451,23 +486,23 @@ async def update_rule_config(
 @router.post("/subjects/{subjectId}/audit/re-evaluate/{ruleCode}")
 async def re_evaluate_rule(
     tenantId: str, subjectId: str, ruleCode: str,
-    di: AsyncSession = Depends(get_di_session),
+    principal: Auth,
+    di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict:
     from verigence.audit.application.context_builder import build_audit_context  # noqa: PLC0415
-    from verigence.audit.application.evaluator import load_rules, evaluate_rule  # noqa: PLC0415
-
+    from verigence.audit.application.evaluator import evaluate_rule, load_rules  # noqa: PLC0415
+    require_tenant(tenantId, principal)
     context = await build_audit_context(di, tenantId, UUID(subjectId))
-    rules = await load_rules(audit, scope="WITHIN_CASE")
-    rule = next((r for r in rules if r.rule_code == ruleCode), None)
+    rules   = await load_rules(audit, scope="WITHIN_CASE")
+    rule    = next((r for r in rules if r.rule_code == ruleCode), None)
     if not rule:
         raise HTTPException(status_code=404, detail=f"Rule {ruleCode!r} not found")
-
     finding = evaluate_rule(rule, context)
     return ok({
-        "ruleCode": ruleCode,
-        "result":   finding.result.value,
-        "detail":   finding.detail,
+        "ruleCode":  ruleCode,
+        "result":    finding.result.value,
+        "detail":    finding.detail,
         "leftValue":  finding.left_value,
         "rightValue": finding.right_value,
     })
