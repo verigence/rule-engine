@@ -1,0 +1,169 @@
+name: Deploy Audit DEV
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-dev-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment: audit-dev
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN || secrets.RAILWAY_TOKEN_DEV }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      AUDIT_API_SERVICE: audit-api
+      DB_SERVICE: Postgres
+      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+    steps:
+      - name: Check out tested revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Verify Audit Railway target
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${RAILWAY_TOKEN:-}" ]]; then
+            echo '::error::RAILWAY_TOKEN or RAILWAY_TOKEN_DEV is required.'
+            exit 1
+          fi
+          railway status --json >/tmp/status.json
+          railway service list --json >/tmp/services.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          project = json.loads(Path('/tmp/status.json').read_text())
+          services = json.loads(Path('/tmp/services.json').read_text())
+          if project.get('id') != os.environ['PLATFORM_PROJECT_ID']:
+              raise SystemExit('Railway token does not target the approved shared DEV project')
+          names = {row.get('name') for row in services}
+          required = {os.environ['AUDIT_API_SERVICE']}
+          missing = required - names
+          if missing:
+              raise SystemExit('Audit Railway target is missing services: ' + ','.join(sorted(missing)))
+          print('AUDIT_RAILWAY_TARGET=PASS')
+          PY
+
+      - name: Validate persisted Audit configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway variable list --service "$AUDIT_API_SERVICE" --json >/tmp/audit-api-vars.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          api = json.loads(Path('/tmp/audit-api-vars.json').read_text())
+          required = [
+              'AUDIT_SECRET_KEY',
+              'AUDIT_WEBHOOK_SECRET',
+              'AUDIT_DB_URL',
+              'AUDIT_DI_DB_URL',
+              'AUDIT_SECURITY_JWKS_URL',
+          ]
+          missing = [key for key in required if not api.get(key)]
+          if missing:
+              raise SystemExit('audit-api missing persisted configuration: ' + ','.join(missing))
+          print('AUDIT_PERSISTED_CONFIG=PASS')
+          PY
+
+      - name: Prepare Audit railway.toml
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/audit-railway.toml <<'TOML'
+          [build]
+          builder = "DOCKERFILE"
+          dockerfilePath = "Dockerfile"
+
+          [deploy]
+          preDeployCommand = ["sh", "-c", "cd backend && alembic upgrade head"]
+          startCommand = "sh -c 'uvicorn verigence.audit.main:create_app --factory --host 0.0.0.0 --port ${PORT:-8000}'"
+          healthcheckPath = "/health/live"
+          healthcheckTimeout = 60
+          restartPolicyType = "ON_FAILURE"
+          restartPolicyMaxRetries = 3
+          TOML
+
+      - name: Deploy Audit API
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/audit-railway.toml backend/railway.toml
+          railway up backend --path-as-root --service "$AUDIT_API_SERVICE" --detach --yes \
+            --message "Audit API DEV ${DEPLOY_SHA}" >/dev/null
+
+      - name: Poll deployment status
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 10); do
+            railway deployment list --service "$AUDIT_API_SERVICE" --limit 1 --json >/tmp/audit-deployment.json
+            status="$(python - <<'PY'
+          import json, os
+          from pathlib import Path
+          rows = json.loads(Path('/tmp/audit-deployment.json').read_text())
+          print(rows[0].get('status', '') if rows else '')
+          PY
+          )"
+            case "$status" in
+              SUCCESS) break ;;
+              FAILED|CRASHED|REMOVED)
+                railway logs --service "$AUDIT_API_SERVICE" --latest --deployment --lines 240 || true
+                echo "audit-api deployment failed: $status" >&2
+                exit 1
+                ;;
+            esac
+            if [[ "$attempt" == "10" ]]; then
+              railway logs --service "$AUDIT_API_SERVICE" --latest --deployment --lines 240 || true
+              echo "audit-api deployment did not reach SUCCESS: $status" >&2
+              exit 1
+            fi
+            sleep 15
+          done
+          echo "AUDIT_DEPLOYMENT=PASS"
+
+      - name: Smoke test /health/live when public domain exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway variable list --service "$AUDIT_API_SERVICE" --json >/tmp/audit-api-vars.json
+          domain="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('/tmp/audit-api-vars.json').read_text())
+          print(data.get('RAILWAY_PUBLIC_DOMAIN') or data.get('RAILWAY_STATIC_URL') or '')
+          PY
+          )"
+          if [[ -z "$domain" ]]; then
+            echo 'AUDIT_PUBLIC_SMOKE=SKIPPED|no public domain configured'
+            exit 0
+          fi
+          case "$domain" in
+            http://*|https://*) base="${domain%/}" ;;
+            *) base="https://${domain%/}" ;;
+          esac
+          curl --fail --silent --show-error "$base/health/live" >/tmp/audit-health.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          body = json.loads(Path('/tmp/audit-health.json').read_text())
+          assert body.get('status') == 'ok', f'Unexpected health response: {body}'
+          print('AUDIT_PUBLIC_SMOKE=PASS')
+          PY
