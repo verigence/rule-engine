@@ -23,7 +23,6 @@ from verigence.audit.settings import get_settings
 logger = structlog.get_logger(__name__)
 
 CORRELATION_ID_HEADER = "X-Correlation-ID"
-# Safe character validation — same spec as DI
 _CORRELATION_SAFE = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-")
 
 
@@ -39,9 +38,13 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(fastapi_app: FastAPI):  # type: ignore[arg-type]
         """Start APScheduler nightly batch on startup; stop on shutdown."""
-        # Scheduler is imported and started in Sub-Task 9.
-        # Placeholder yields immediately so the skeleton is runnable now.
+        from verigence.audit.scheduler.batch import get_batch_scheduler  # noqa: PLC0415
+        scheduler = get_batch_scheduler()
+        scheduler.start()
+        logger.info("audit_scheduler_started", batch_hour=settings.batch_hour)
         yield
+        scheduler.shutdown(wait=False)
+        logger.info("audit_scheduler_stopped")
 
     app = FastAPI(
         title="Verigence Audit API",
@@ -120,7 +123,7 @@ def create_app() -> FastAPI:
             headers={CORRELATION_ID_HEADER: correlation_id},
         )
 
-    # ── Layer 2: HTTPException → pass-through ─────────────────────────────────
+    # ── Layer 2: HTTPException pass-through ───────────────────────────────────
     @app.exception_handler(HTTPException)
     async def _http_exception_handler(
         request: Request, exc: HTTPException
@@ -176,7 +179,6 @@ def create_app() -> FastAPI:
                 headers={CORRELATION_ID_HEADER: correlation_id},
             )
         duration_ms = round((time.perf_counter() - start) * 1000, 1)
-
         response.headers[CORRELATION_ID_HEADER] = correlation_id
         logger.info(
             "http_request",
@@ -188,9 +190,13 @@ def create_app() -> FastAPI:
         return response
 
     # ── Routers ───────────────────────────────────────────────────────────────
-    from verigence.audit.api.health import router as health_router  # noqa: PLC0415
+    from verigence.audit.api.health import router as health_router            # noqa: PLC0415
+    from verigence.audit.api.v1.internal import router as internal_router    # noqa: PLC0415
+    from verigence.audit.api.v1.audit import router as audit_router          # noqa: PLC0415
+
     app.include_router(health_router)
-    # Additional routers (internal, audit) added in Sub-Tasks 8 & 9
+    app.include_router(internal_router)
+    app.include_router(audit_router)
 
     # ── Sentry ────────────────────────────────────────────────────────────────
     if settings.sentry_dsn:
