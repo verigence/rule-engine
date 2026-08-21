@@ -1,10 +1,43 @@
 # Audit Test Client
 
-A command-line tool that exercises the full Verigence pipeline end-to-end:
+A CLI that exercises the full Verigence pipeline end-to-end:
 
 ```
-DI document upload → DI extraction → DI confirm → Rule Engine audit → findings
+DI: create subject → upload documents → worker auto-processes & confirms
+                                              ↓
+                                     document_search_index populated
+                                              ↓
+Rule engine: read index → evaluate 85 rules → findings
 ```
+
+---
+
+## How the DI pipeline actually works
+
+This is critical to understand before using this tool:
+
+| Step | What happens | Who does it |
+|---|---|---|
+| `POST /subjects` | Create subject with `subjectType` | Caller |
+| `POST /documents` | Upload file + `documentTypeKey` hint | Caller |
+| *(async)* | DI worker classifies doc using Gemini | DI worker |
+| *(async)* | Gemini extracts fields → `document_search_index` | DI worker |
+| *(auto)* | Worker sets `processingStatus=PROCESSED`, `confirmationStatus=CONFIRMED` | DI worker, Step 17 |
+| Poll | Wait until `processingStatus == PROCESSED` | Caller |
+| Audit | Rule engine reads `document_search_index.indexed_fields` | Rule engine |
+
+**There is no `/confirm` endpoint.** Confirmation happens automatically at the end of the worker pipeline.
+
+### The `documentTypeKey` hint
+
+`documentTypeKey` is passed to DI's AI classifier as a hint. DI checks `tenant_document_types` to see if the key is registered. Two outcomes:
+
+| Key is... | DI does... | indexed_fields |
+|---|---|---|
+| Registered in `tenant_document_types` with `requires_processing=true` | Gemini runs classification + extraction | Populated ✓ |
+| Not registered / unknown | Document type = `ADDITIONAL`, `requires_processing=false` | **Empty** — rules SKIP |
+
+**Ask your DI admin which document type keys are registered for your tenant before running tests.**
 
 ---
 
@@ -21,56 +54,56 @@ pip install -r requirements.txt
 
 | Input | How to get it |
 |---|---|
-| `TENANT_ID` | Your tenant UUID in Verigence |
-| `DI_BASE_URL` | DI service URL, e.g. `https://verigence-di.up.railway.app` |
-| `AUDIT_BASE_URL` | Rule engine URL, e.g. `https://audit-api.up.railway.app` |
-| `AUTH_TOKEN` | Bearer JWT — see "Auth tokens" below |
-| Document files | PDF or image files — one per document type |
+| `--tenant-id` | Your tenant UUID |
+| `--di-url` | DI service URL, e.g. `https://verigence-di.up.railway.app` |
+| `--audit-url` | Rule engine URL, e.g. `https://audit-api.up.railway.app` |
+| `--token` | Bearer JWT — see below |
+| `--doc KEY:FILE` | One or more documents. KEY must be a registered `documentTypeKey` |
 
 ### Auth tokens
 
-**Dev / local (mock JWT):**
+**Dev / local (mock JWT — DI_ENV != production):**
 ```
 mock.<tenantId>.<actorId>.TENANT_ADMIN
 ```
 Example: `mock.tenant-abc.user-1.TENANT_ADMIN`
 
-**Production:** obtain a real JWT from the Verigence Security module.
+**Production:** obtain a real JWT from Verigence Security.
 
 ---
 
-## Quick start — single command
+## Quick start
 
 ```bash
 python client.py \
-  --di-url   https://verigence-di.up.railway.app \
+  --di-url    https://verigence-di.up.railway.app \
   --audit-url https://audit-api.up.railway.app \
-  --tenant-id <TENANT_ID> \
-  --token     "mock.<TENANT_ID>.user-1.TENANT_ADMIN" \
-  --doc       booking_docket:./samples/booking_docket.pdf \
-  --doc       tax_invoice_dms:./samples/invoice.pdf \
-  --doc       form_29_30:./samples/form_29_30.pdf \
+  --tenant-id <TENANT_UUID> \
+  --token     "mock.<TENANT_UUID>.user-1.TENANT_ADMIN" \
+  --subject-type PERSON \
+  --display-name "Test Customer" \
+  --doc booking_docket:./samples/booking.pdf \
+  --doc tax_invoice_dms:./samples/invoice.pdf \
   audit full
 ```
 
 The tool will:
-1. Create a new subject (auto-generated UUID unless `--subject-id` is given)
-2. Upload each `--doc` file to DI under that subject
-3. Poll until DI processing is complete
-4. Confirm each document
-5. Call the rule engine audit endpoint
-6. Print a colour-coded findings table
+1. Create a new subject (`subjectType=PERSON`)
+2. Upload each `--doc` file to DI with the given key as a classifier hint
+3. Poll `GET /subjects/{sid}/documents/{docId}` until `processingStatus=PROCESSED`
+4. Call the rule engine — `confirmation_status=CONFIRMED` is already set by the worker
+5. Print a colour-coded findings table
 
 ---
 
 ## Commands
 
-### `audit full` — run all 85 rules
+### `audit full` — all 85 rules
 ```bash
 python client.py [OPTIONS] audit full
 ```
 
-### `audit phase` — run a single phase
+### `audit phase` — one process phase
 ```bash
 python client.py [OPTIONS] audit phase --phase booking
 python client.py [OPTIONS] audit phase --phase delivery
@@ -79,40 +112,43 @@ python client.py [OPTIONS] audit phase --phase exchange
 python client.py [OPTIONS] audit phase --phase corporate
 ```
 
-### `audit cross-case` — run cross-case duplicate scan (tenant-wide)
+### `audit cross-case` — tenant-wide duplicate scan
 ```bash
 python client.py [OPTIONS] audit cross-case
 ```
-Note: cross-case does not upload documents — it scans all existing confirmed subjects.
+No subject or documents needed — scans all confirmed subjects for the tenant.
 
-### `findings list` — fetch stored findings without re-running
+### `findings list` — query stored findings
 ```bash
 python client.py [OPTIONS] findings list
-python client.py [OPTIONS] findings list --subject-id <UUID>
+python client.py [OPTIONS] --subject-id <UUID> findings list
+python client.py [OPTIONS] findings list --severity CRITICAL
 ```
 
-### `findings pending` — show unacknowledged CRITICAL/WARNING findings
+### `findings pending` — unacknowledged CRITICAL/WARNING
 ```bash
 python client.py [OPTIONS] findings pending
 ```
 
-### `rules list` — show all 85 rules
+### `rules list` — all 85 rules
 ```bash
 python client.py [OPTIONS] rules list
+python client.py [OPTIONS] rules list --category "Price Chain"
+python client.py [OPTIONS] rules list --enabled-only
 ```
 
 ---
 
-## Skip DI upload (audit an existing subject)
+## Audit an existing subject (skip upload)
 
-If documents are already uploaded and confirmed in DI, skip straight to the audit:
+If documents are already uploaded and processed in DI:
 
 ```bash
 python client.py \
-  --di-url   https://verigence-di.up.railway.app \
+  --di-url    https://verigence-di.up.railway.app \
   --audit-url https://audit-api.up.railway.app \
-  --tenant-id <TENANT_ID> \
-  --token     "mock.<TENANT_ID>.user-1.TENANT_ADMIN" \
+  --tenant-id <TENANT_UUID> \
+  --token     "mock.<TENANT_UUID>.user-1.TENANT_ADMIN" \
   --subject-id <EXISTING_SUBJECT_UUID> \
   --skip-upload \
   audit full
@@ -120,59 +156,58 @@ python client.py \
 
 ---
 
-## Document type keys
+## Environment variables
 
-Use these exact keys with `--doc <key>:<path>`:
+All flags can be set via env vars:
+
+```bash
+export AUDIT_DI_URL=https://verigence-di.up.railway.app
+export AUDIT_URL=https://audit-api.up.railway.app
+export AUDIT_TENANT_ID=<TENANT_UUID>
+export AUDIT_TOKEN="mock.<TENANT_UUID>.user-1.TENANT_ADMIN"
+```
+
+---
+
+## SubjectType values
+
+| Value | Meaning |
+|---|---|
+| `PERSON` | Individual customer (default) |
+| `ORGANIZATION` | Corporate / company |
+| `OTHER` | Anything else |
+
+---
+
+## Common `documentTypeKey` values
+
+These must be **registered in your tenant's `tenant_document_types`** table.
+Ask your DI admin if unsure. Unregistered keys silently produce empty `indexed_fields`.
 
 | Key | Document |
 |---|---|
 | `booking_docket` | Booking docket / order form |
-| `tax_invoice_dms` | Tax invoice (DMS copy) |
+| `tax_invoice_dms` | Tax invoice (DMS system copy) |
 | `tax_invoice_tally` | Tax invoice (Tally copy) |
-| `form_29_30` | Form 29 & 30 (RTO transfer) |
-| `insurance_certificate` | Insurance certificate |
-| `hypothecation_letter` | Hypothecation / finance letter |
-| `exchange_valuation` | Exchange vehicle valuation |
+| `form_29_30` | Form 29 & 30 (RTO vehicle transfer) |
+| `insurance_certificate` | Motor insurance certificate |
+| `hypothecation_letter` | Finance / hypothecation letter |
+| `exchange_valuation` | Exchange vehicle valuation report |
 | `pan_card` | Customer PAN card |
 | `aadhaar_card` | Customer Aadhaar card |
 | `ndc_certificate` | NDC / No Due Certificate |
 | `delivery_note` | Delivery note / gate pass |
 | `debit_note` | Debit note |
 
-You can pass as many or as few as you have — rules that need a missing document will be `SKIPPED`.
-
 ---
 
-## Environment variables
+## What "SKIPPED" means in audit results
 
-All CLI flags can also be set via environment variables:
+A rule returns `SKIPPED` when a required field is absent from `indexed_fields`. This happens when:
 
-```bash
-export AUDIT_DI_URL=https://verigence-di.up.railway.app
-export AUDIT_URL=https://audit-api.up.railway.app
-export AUDIT_TENANT_ID=<TENANT_ID>
-export AUDIT_TOKEN="mock.<TENANT_ID>.user-1.TENANT_ADMIN"
-```
+1. The `documentTypeKey` was not registered in `tenant_document_types` → Gemini never ran
+2. The document upload was REJECTED
+3. The worker failed (`processingStatus=FAILED`)
+4. The field simply wasn't extracted (Gemini returned null)
 
----
-
-## Example output
-
-```
-✓ Subject created:   3f2a1b4c-...
-✓ Uploaded:          booking_docket  →  doc-id-001
-✓ Uploaded:          tax_invoice_dms →  doc-id-002
-⏳ Polling DI status: 2/10 attempts...
-✓ Confirmed:         doc-id-001
-✓ Confirmed:         doc-id-002
-✓ Audit complete:    verdict=FAIL  rules=85  pass=71  fail=8  skipped=6
-
-┌──────────────────────────────────────────────────────────────────┐
-│                        Audit Findings                            │
-├──────────┬──────────┬───────────────┬──────────────────────────┤
-│ RuleCode │ Severity │ Category      │ Detail                   │
-├──────────┼──────────┼───────────────┼──────────────────────────┤
-│ P1.01    │ CRITICAL │ Price Chain   │ Booking vs invoice ≠     │
-│ D1.01    │ WARNING  │ Discount Chain│ Discount > 3% of OTR     │
-└──────────┴──────────┴───────────────┴──────────────────────────┘
-```
+A high SKIPPED count usually means the `documentTypeKey` values you used aren't registered.
