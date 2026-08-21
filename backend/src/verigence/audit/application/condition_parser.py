@@ -7,12 +7,12 @@ DSL grammar (design doc §7.2):
     doc_absent:<doc_type_key>
     field_gt:<doc_type_key>.<field_key>:<threshold>
 
-  compound:
-    <atom> AND <atom>   (space-separated token AND)
-    <atom> OR  <atom>
+  compound (space-separated, case-sensitive keywords):
+    <atom> AND <atom>   — all atoms must be True
+    <atom> OR  <atom>   — any atom must be True
 
-  Evaluation returns True  → condition met → rule should fire.
-                     False → condition not met → rule result is SKIPPED.
+  Returns True  → condition met → rule fires.
+           False → condition not met → rule result is SKIPPED.
 
 Pure Python — no I/O, no DB. Operates on AuditContext.
 """
@@ -22,7 +22,7 @@ from verigence.audit.domain.types import AuditContext
 
 
 def _eval_atom(token: str, context: AuditContext) -> bool:
-    """Evaluate a single DSL atom."""
+    """Evaluate a single DSL atom against the given context."""
     token = token.strip()
 
     if token.startswith("doc_present:"):
@@ -49,7 +49,6 @@ def _eval_atom(token: str, context: AuditContext) -> bool:
             threshold = float(threshold_str)
         except ValueError:
             return False
-
         for doc in context.documents:
             if doc.document_type_key == doc_type:
                 raw = doc.indexed_fields.get(field_key)
@@ -62,7 +61,7 @@ def _eval_atom(token: str, context: AuditContext) -> bool:
                     continue
         return False
 
-    # Unknown atom — treat as False (conservative)
+    # Unknown atom — conservative: treat as False
     return False
 
 
@@ -72,37 +71,20 @@ def evaluate_condition(expr: str, context: AuditContext) -> bool:
 
     Returns True  → condition met, rule should fire.
     Returns False → condition not met, rule result is SKIPPED.
-    None / empty expr  → True (no precondition — always fire).
+    Empty / None expr → True (no precondition — always fire).
     """
     if not expr or not expr.strip():
         return True
 
     expr = expr.strip()
 
-    # Compound AND  (all tokens must be True)
-    if " AND " in expr:
-        return all(_eval_atom(t) for t in expr.split(" AND "))  # type: ignore[call-arg]
-
-    # Compound OR   (any token must be True)
-    if " OR " in expr:
-        return any(_eval_atom(t) for t in expr.split(" OR "))  # type: ignore[call-arg]
-
-    # Single atom
-    return _eval_atom(expr, context)
-
-
-# Fix: pass context into _eval_atom via closure above — correct the nested calls:
-def evaluate_condition(expr: str, context: AuditContext) -> bool:  # noqa: F811
-    """Evaluate a condition_expression string against an AuditContext."""
-    if not expr or not expr.strip():
-        return True
-
-    expr = expr.strip()
-
+    # Compound AND — every atom must be True
     if " AND " in expr:
         return all(_eval_atom(t, context) for t in expr.split(" AND "))
 
+    # Compound OR — any atom must be True
     if " OR " in expr:
         return any(_eval_atom(t, context) for t in expr.split(" OR "))
 
+    # Single atom
     return _eval_atom(expr, context)
