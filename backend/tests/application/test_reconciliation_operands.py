@@ -87,7 +87,28 @@ def test_derived_lineitem_sums_matching_invoice_category() -> None:
     assert _resolve_derived_operand(ctx, "lineitem:RSA") is None
 
 
+# ── _journey_id_from_context_ref ─────────────────────────────────────────────────
+
+def test_journey_id_parsed_from_audit_core_context_ref() -> None:
+    journey = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    customer = "11111111-2222-3333-4444-555555555555"
+    ref = f"audit-{journey}-{customer}"
+    assert context_builder._journey_id_from_context_ref(ref) == journey
+
+
+def test_journey_id_from_context_ref_rejects_non_audit_core_shapes() -> None:
+    assert context_builder._journey_id_from_context_ref("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee") is None
+    assert context_builder._journey_id_from_context_ref("audit-not-a-uuid-x") is None
+    assert context_builder._journey_id_from_context_ref("") is None
+
+
 # ── _load_reconciliation ─────────────────────────────────────────────────────────
+
+_CONTEXT_REF = (
+    "audit-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    "-11111111-2222-3333-4444-555555555555"
+)
+
 
 def _scalar_result(value):
     r = MagicMock()
@@ -105,7 +126,7 @@ def _rows_result(rows):
 async def test_load_reconciliation_builds_all_three_buckets() -> None:
     session = AsyncMock()
     session.execute = AsyncMock(side_effect=[
-        _scalar_result("11111111-1111-1111-1111-111111111111"),  # journey ref
+        _scalar_result(_CONTEXT_REF),                            # audit-storage-context ref
         _rows_result([("ex_showroom_price", 900000, 905000)]),   # commercial_lines
         _rows_result([("CORPORATE", None, 40000)]),              # discount_applications
         _rows_result([("EXTENDED_WARRANTY", None, 18000)]),      # journey_addons
@@ -122,6 +143,13 @@ async def test_load_reconciliation_builds_all_three_buckets() -> None:
 async def test_load_reconciliation_returns_empty_when_no_context_row() -> None:
     session = AsyncMock()
     session.execute = AsyncMock(return_value=_scalar_result(None))
+    assert await context_builder._load_reconciliation(session, TENANT, SUBJECT) == {}
+
+
+@pytest.mark.asyncio
+async def test_load_reconciliation_returns_empty_when_context_ref_unparseable() -> None:
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_scalar_result("legacy-ref-without-journey"))
     assert await context_builder._load_reconciliation(session, TENANT, SUBJECT) == {}
 
 
