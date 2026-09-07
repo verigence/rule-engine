@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from verigence.audit.application.condition_parser import evaluate_condition
 from verigence.audit.application.context_builder import (
+    _to_float,
     _to_str,
     aggregate_field,
     build_audit_context,
@@ -122,6 +123,15 @@ def resolve_operand(
     if not doc_type or not field_key:
         return None, None
 
+    # Audit Core reconciliation operand: "_reconciliation" / "<bucket>:<key>:<side>"
+    #   e.g. left_doc_type="_reconciliation", left_field_key="discount:CORPORATE:standard"
+    if doc_type == "_reconciliation":
+        return _resolve_reconciliation_operand(context, field_key), None
+
+    # Rule-engine derived operand: "_derived" / "payments_total" | "lineitem:<CATEGORY>"
+    if doc_type == "_derived":
+        return _resolve_derived_operand(context, field_key), None
+
     # Numeric aggregation
     val = aggregate_field(context.documents, doc_type, field_key, aggregation, as_date=False)
     # Date aggregation fallback
@@ -138,6 +148,79 @@ def resolve_operand(
     source_id: UUID | None = typed_docs[0].document_id if typed_docs else None
 
     return val, source_id
+
+
+# ── Derived / reconciliation operands ────────────────────────────────────────────
+
+# Payment evidence document type → the field holding that document's paid amount.
+_PAYMENT_AMOUNT_FIELD: dict[str, str] = {
+    "dealer_receipt": "amount_paid",
+    "upi_transaction": "amount_paid",
+    "upi_screenshot": "amount_paid",
+    "bank_statement_extract": "credit_amount",
+}
+# Invoice document types that carry a line_items[] array.
+_INVOICE_LINE_ITEM_TYPES = frozenset({
+    "customer_invoice_dms",
+    "tax_invoice_tally",
+    "wholesale_invoice",
+    "invoice_generic",
+    "accessory_invoice_dms",
+    "accessory_invoice_tally",
+    "ew_invoice",
+    "rsa_invoice",
+})
+
+
+def _resolve_reconciliation_operand(context: AuditContext, field_key: str) -> Any:
+    """field_key: '<bucket>:<key>:<side>' e.g. 'discount:CORPORATE:standard'."""
+    parts = field_key.split(":")
+    if len(parts) != 3:
+        return None
+    bucket, key, side = parts
+    return context.reconciliation.get(bucket, {}).get(key, {}).get(side)
+
+
+def _sum_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(sum(values))
+
+
+def _resolve_derived_operand(context: AuditContext, field_key: str) -> Any:
+    if field_key == "payments_total":
+        amounts: list[float] = []
+        for doc in context.documents:
+            amount_field = _PAYMENT_AMOUNT_FIELD.get(doc.document_type_key)
+            if amount_field is None:
+                continue
+            value = _to_float(doc.indexed_fields.get(amount_field))
+            if value is not None:
+                amounts.append(value)
+        return _sum_or_none(amounts)
+
+    if field_key.startswith("lineitem:"):
+        category = field_key.split(":", 1)[1].upper()
+        amounts = []
+        for doc in context.documents:
+            if doc.document_type_key not in _INVOICE_LINE_ITEM_TYPES:
+                continue
+            line_items = doc.indexed_fields.get("line_items")
+            if not isinstance(line_items, list):
+                continue
+            for item in line_items:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("line_category") or "").upper() != category:
+                    continue
+                value = _to_float(item.get("net_amount"))
+                if value is None:
+                    value = _to_float(item.get("amount"))
+                if value is not None:
+                    amounts.append(value)
+        return _sum_or_none(amounts)
+
+    return None
 
 
 # ── Message rendering ──────────────────────────────────────────────────────────────
@@ -181,9 +264,10 @@ def evaluate_rule(rule: AuditRule, context: AuditContext) -> AuditFinding:
     SKIPPED findings are NOT persisted — only counted in the run summary.
     """
     # Step 1: condition_expression pre-check
-    if rule.condition_expression:
-        if not evaluate_condition(rule.condition_expression, context):
-            return _skipped(rule, f"condition not met: {rule.condition_expression}")
+    if rule.condition_expression and not evaluate_condition(
+        rule.condition_expression, context
+    ):
+        return _skipped(rule, f"condition not met: {rule.condition_expression}")
 
     # Step 2: requires_both_docs — both document types must exist in context
     if rule.requires_both_docs:
