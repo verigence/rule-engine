@@ -6,7 +6,6 @@ CROSS_CASE AuditFinding per duplicate group.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -24,11 +23,12 @@ from verigence.audit.repositories.audit_runs import complete_run, create_run
 
 logger = structlog.get_logger(__name__)
 
-# Rule definitions for the 6 cross-case scans
+# Cross-case duplicate scans. doc_type / field_key point at DI's real
+# SCHEMA_REGISTRY keys — see docs/RULE_DI_CROSSWALK.md.
 _CROSS_CASE_RULES: list[dict[str, Any]] = [
     {
         "rule_code": "DUPLICATE_PAN_ACROSS_BOOKINGS",
-        "doc_type":  "kyc_pan",
+        "doc_type":  "pan_card",
         "field_key": "pan_number",
         "severity":  "CRITICAL",
         "message":   "Same PAN {val} appears in {cnt} active bookings.",
@@ -36,7 +36,7 @@ _CROSS_CASE_RULES: list[dict[str, Any]] = [
     },
     {
         "rule_code": "DUPLICATE_AADHAAR_ACROSS_BOOKINGS",
-        "doc_type":  "kyc_aadhaar",
+        "doc_type":  "aadhaar",
         "field_key": "aadhaar_number",
         "severity":  "CRITICAL",
         "message":   "Same Aadhaar {val} linked to {cnt} active deals.",
@@ -44,23 +44,25 @@ _CROSS_CASE_RULES: list[dict[str, Any]] = [
     },
     {
         "rule_code": "DUPLICATE_CHASSIS_ACROSS_INVOICES",
-        "doc_type":  "tax_invoice_dms",
+        "doc_type":  "customer_invoice_dms",
         "field_key": "chassis_number",
         "severity":  "CRITICAL",
         "message":   "Same VIN {val} invoiced in {cnt} different deals.",
         "category":  "CROSS_CASE",
     },
     {
+        # gate_pass has no chassis field; the registration number is the
+        # vehicle identifier it does carry.
         "rule_code": "DUPLICATE_CHASSIS_ACROSS_GATE_PASSES",
         "doc_type":  "gate_pass",
-        "field_key": "chassis_number",
+        "field_key": "vehicle_registration_number",
         "severity":  "CRITICAL",
         "message":   "Same vehicle {val} exited the premises in {cnt} deals.",
         "category":  "CROSS_CASE",
     },
     {
         "rule_code": "DUPLICATE_RECEIPT_ACROSS_CASES",
-        "doc_type":  "payment_receipt_tally",
+        "doc_type":  "dealer_receipt",
         "field_key": "receipt_number",
         "severity":  "CRITICAL",
         "message":   "Same receipt number {val} used in {cnt} different deals.",
@@ -68,10 +70,10 @@ _CROSS_CASE_RULES: list[dict[str, Any]] = [
     },
     {
         "rule_code": "DUPLICATE_UTR_ACROSS_CASES",
-        "doc_type":  "payment_receipt_tally",
-        "field_key": "utr_number",
+        "doc_type":  "dealer_receipt",
+        "field_key": "payment_reference_no",
         "severity":  "CRITICAL",
-        "message":   "Same UTR {val} claimed against {cnt} different deals.",
+        "message":   "Same payment reference {val} claimed against {cnt} different deals.",
         "category":  "CROSS_CASE",
     },
 ]
