@@ -8,6 +8,7 @@ Pattern mirrors verigence-di/application/reconciliation.py exactly:
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Any
 from uuid import UUID
@@ -109,6 +110,20 @@ def first_doc_of_type(
 
 # ── Main builder ──────────────────────────────────────────────────────────────────
 
+# Audit Core builds its audit-storage-context ref as "audit-<journeyId>-<customerId>"
+# (verigence-audit-core evidence.py::_external_context_ref). The reconciliation
+# tables are keyed by journey_id, so the journey UUID has to be pulled back out.
+_CONTEXT_REF_RE = re.compile(
+    r"^audit-(?P<journey>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})-[0-9a-fA-F]{8}-",
+)
+
+
+def _journey_id_from_context_ref(context_ref: str) -> str | None:
+    match = _CONTEXT_REF_RE.match(context_ref)
+    return match.group("journey") if match else None
+
+
 _RECONCILIATION_BUCKETS: tuple[tuple[str, str, str, str], ...] = (
     # (bucket, table, key_column, (standard_col, actual_col))
     ("commercial", "auditcore.commercial_lines", "component_key",
@@ -128,12 +143,13 @@ async def _load_reconciliation(
     """Load Audit Core's standard-vs-actual money projection for the subject.
 
     subject_id maps to a Journey via docintel.audit_storage_contexts
-    (external_context_ref). Best-effort: any failure (Audit Core schema not
-    granted to the read-only role, no context row, etc.) returns {} so the
-    dependent rules SKIP rather than the audit run failing.
+    (external_context_ref = "audit-<journeyId>-<customerId>"). Best-effort: any
+    failure (Audit Core schema not granted to the read-only role, no context
+    row, unparseable ref, etc.) returns {} so the dependent rules SKIP rather
+    than the audit run failing.
     """
     try:
-        journey_ref = (
+        context_ref = (
             await di_session.execute(
                 text(
                     """
@@ -146,7 +162,10 @@ async def _load_reconciliation(
                 {"tid": str(tenant_id), "sid": str(subject_id)},
             )
         ).scalar_one_or_none()
-        if not journey_ref:
+        journey_id = (
+            _journey_id_from_context_ref(context_ref) if context_ref else None
+        )
+        if not journey_id:
             return {}
 
         buckets: dict[str, dict[str, Any]] = {}
@@ -163,7 +182,7 @@ async def _load_reconciliation(
                           AND  journey_id = CAST(:jid AS uuid)
                         """
                     ),
-                    {"tid": str(tenant_id), "jid": str(journey_ref)},
+                    {"tid": str(tenant_id), "jid": journey_id},
                 )
             ).all()
             entry: dict[str, Any] = {}
