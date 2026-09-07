@@ -62,6 +62,12 @@ class AuditContext:
     subject_id: UUID
     documents:  list[DocumentContext]
     config:     dict[str, Any]  # resolved config constants from DEFAULT_CONFIG + overrides
+    # Standard-vs-actual money projection from Audit Core, keyed by bucket then key:
+    #   {"commercial": {component_key: {"standard": x, "actual": y}},
+    #    "discount":   {discount_key:  {"standard": x, "actual": y}},
+    #    "addon":      {addon_type_code: {"standard": x, "actual": y}}}
+    # Empty when Audit Core is unreachable — dependent rules then SKIP.
+    reconciliation: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass

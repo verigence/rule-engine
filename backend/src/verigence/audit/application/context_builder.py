@@ -12,10 +12,13 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
+import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from verigence.audit.domain.types import AuditContext, DocumentContext
+
+logger = structlog.get_logger(__name__)
 
 # ── Type-cast helpers (copy of reconciliation.py pattern) ────────────────────────
 
@@ -103,6 +106,81 @@ def first_doc_of_type(
 
 # ── Main builder ──────────────────────────────────────────────────────────────────
 
+_RECONCILIATION_BUCKETS: tuple[tuple[str, str, str, str], ...] = (
+    # (bucket, table, key_column, (standard_col, actual_col))
+    ("commercial", "auditcore.commercial_lines", "component_key",
+     "standard_amount, actual_amount"),
+    ("discount", "auditcore.discount_applications", "discount_key",
+     "standard_eligible_amount, actual_discount_amount"),
+    ("addon", "auditcore.journey_addons", "addon_type_code",
+     "standard_amount, actual_amount"),
+)
+
+
+async def _load_reconciliation(
+    di_session: AsyncSession,
+    tenant_id: str,
+    subject_id: UUID | str,
+) -> dict[str, dict[str, Any]]:
+    """Load Audit Core's standard-vs-actual money projection for the subject.
+
+    subject_id maps to a Journey via docintel.audit_storage_contexts
+    (external_context_ref). Best-effort: any failure (Audit Core schema not
+    granted to the read-only role, no context row, etc.) returns {} so the
+    dependent rules SKIP rather than the audit run failing.
+    """
+    try:
+        journey_ref = (
+            await di_session.execute(
+                text(
+                    """
+                    SELECT external_context_ref
+                    FROM   docintel.audit_storage_contexts
+                    WHERE  tenant_id = :tid AND subject_id = :sid
+                    LIMIT  1
+                    """
+                ),
+                {"tid": str(tenant_id), "sid": str(subject_id)},
+            )
+        ).scalar_one_or_none()
+        if not journey_ref:
+            return {}
+
+        buckets: dict[str, dict[str, Any]] = {}
+        for bucket, table, key_column, amount_columns in _RECONCILIATION_BUCKETS:
+            rows = (
+                await di_session.execute(
+                    # table / columns come only from the fixed _RECONCILIATION_BUCKETS
+                    # literal above — no user input in this string.
+                    text(
+                        f"""
+                        SELECT {key_column} AS k, {amount_columns}
+                        FROM   {table}
+                        WHERE  tenant_id = :tid
+                          AND  journey_id = CAST(:jid AS uuid)
+                        """
+                    ),
+                    {"tid": str(tenant_id), "jid": str(journey_ref)},
+                )
+            ).all()
+            entry: dict[str, Any] = {}
+            for row in rows:
+                entry[str(row[0])] = {
+                    "standard": _to_float(row[1]),
+                    "actual": _to_float(row[2]),
+                }
+            buckets[bucket] = entry
+        return buckets
+    except Exception:
+        await di_session.rollback()
+        logger.warning(
+            "audit_core_reconciliation_load_failed",
+            tenant_id=str(tenant_id),
+            subject_id=str(subject_id),
+        )
+        return {}
+
+
 async def build_audit_context(
     di_session: AsyncSession,
     tenant_id: str,
@@ -143,9 +221,12 @@ async def build_audit_context(
     if config_overrides:
         config.update(config_overrides)
 
+    reconciliation = await _load_reconciliation(di_session, tenant_id, subject_id)
+
     return AuditContext(
         tenant_id=str(tenant_id),
         subject_id=UUID(str(subject_id)),
         documents=documents,
         config=config,
+        reconciliation=reconciliation,
     )
