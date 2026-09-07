@@ -74,10 +74,7 @@ def aggregate_field(
     values: list[Any] = []
     for doc in typed_docs:
         raw = doc.indexed_fields.get(field_key)
-        if as_date:
-            v = _to_date(raw)
-        else:
-            v = _to_float(raw)
+        v = _to_date(raw) if as_date else _to_float(raw)
         if v is not None:
             values.append(v)
 
@@ -85,12 +82,18 @@ def aggregate_field(
         return None
 
     match aggregation:
-        case "SINGLE":  return values[0]
-        case "SUM":     return sum(values)  # type: ignore[return-value]
-        case "MAX":     return max(values)
-        case "MIN":     return min(values)
-        case "COUNT":   return len(values)
-        case _:         return values[0]
+        case "SINGLE":
+            return values[0]
+        case "SUM":
+            return sum(values)  # type: ignore[return-value]
+        case "MAX":
+            return max(values)
+        case "MIN":
+            return min(values)
+        case "COUNT":
+            return len(values)
+        case _:
+            return values[0]
 
 
 def first_doc_of_type(

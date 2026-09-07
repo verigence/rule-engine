@@ -264,9 +264,10 @@ def evaluate_rule(rule: AuditRule, context: AuditContext) -> AuditFinding:
     SKIPPED findings are NOT persisted — only counted in the run summary.
     """
     # Step 1: condition_expression pre-check
-    if rule.condition_expression:
-        if not evaluate_condition(rule.condition_expression, context):
-            return _skipped(rule, f"condition not met: {rule.condition_expression}")
+    if rule.condition_expression and not evaluate_condition(
+        rule.condition_expression, context
+    ):
+        return _skipped(rule, f"condition not met: {rule.condition_expression}")
 
     # Step 2: requires_both_docs — both document types must exist in context
     if rule.requires_both_docs:

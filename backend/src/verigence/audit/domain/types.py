@@ -5,7 +5,6 @@ No I/O, no DB, no FastAPI imports. Fully unit-testable in isolation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
 from enum import Enum
 from typing import Any
 from uuid import UUID
