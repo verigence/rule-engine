@@ -85,7 +85,7 @@ def aggregate_field(
         case "SINGLE":
             return values[0]
         case "SUM":
-            return sum(values)  # type: ignore[return-value]
+            return sum(values)
         case "MAX":
             return max(values)
         case "MIN":
