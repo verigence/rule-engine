@@ -61,9 +61,19 @@ async def load_rules(
 
     if phases:
         # Build one JSONB containment clause per requested phase, unioned with FULL.
-        # e.g.  AND (phases @> '["DELIVERY"]'::jsonb OR phases @> '["FULL"]'::jsonb)
+        # e.g.  AND (phases @> CAST(:phase_0 AS jsonb) OR phases @> '["FULL"]'::jsonb)
+        #
+        # CAST(...) here, not the terser `:phase_0::jsonb` -- SQLAlchemy's text()
+        # bind-parameter parser does not recognize a `:name` immediately followed
+        # by `::` (no space) as a bind parameter at all; it silently leaves the
+        # literal `:phase_0` in the compiled SQL instead of substituting it, which
+        # asyncpg then rejects outright ("syntax error at or near \":\""). Verified
+        # by compiling this exact fragment: `SELECT :x::jsonb` yields zero detected
+        # bind params, while `SELECT CAST(:x AS jsonb)` yields `x`. This silently
+        # broke every phase-scoped call (i.e. every real evaluate_phase call this
+        # service receives) since the phase filter was introduced.
         phase_clauses = " OR ".join(
-            f"phases @> :phase_{i}::jsonb" for i in range(len(phases))
+            f"phases @> CAST(:phase_{i} AS jsonb)" for i in range(len(phases))
         )
         base_sql += f" AND ({phase_clauses} OR phases @> '[\"FULL\"]'::jsonb)"
         for i, phase in enumerate(phases):
