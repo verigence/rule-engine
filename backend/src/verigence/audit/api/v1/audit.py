@@ -237,7 +237,7 @@ async def audit_booking(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["BOOKING"])
     return ok({**data, "phase": "BOOKING"})
@@ -250,7 +250,7 @@ async def audit_delivery(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["DELIVERY"])
     return ok({**data, "phase": "DELIVERY"})
@@ -263,7 +263,7 @@ async def audit_finance(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["FINANCE"])
     return ok({**data, "phase": "FINANCE"})
@@ -276,7 +276,7 @@ async def audit_exchange(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["EXCHANGE"])
     return ok({**data, "phase": "EXCHANGE"})
@@ -289,7 +289,7 @@ async def audit_corporate(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["CORPORATE"])
     return ok({**data, "phase": "CORPORATE"})
@@ -302,7 +302,7 @@ async def audit_by_category(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId)
     data["anomalies"] = [a for a in data["anomalies"] if a["category"] in body.categories]
@@ -316,7 +316,7 @@ async def audit_by_documents(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId)
     return ok(data)
@@ -330,7 +330,7 @@ async def full_audit(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId)
     return ok(data)
@@ -341,7 +341,7 @@ async def get_audit_runs(
     tenantId: str, subjectId: str,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     runs = await list_runs(audit, tenantId, subjectId)
     return ok({"runs": runs})
@@ -356,7 +356,7 @@ async def subject_findings(
     result:   str | None = None,
     severity: str | None = None,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     findings = await get_findings(audit, tenantId, subjectId, result=result, severity=severity)
     return ok({"findings": findings})
@@ -367,7 +367,7 @@ async def subject_summary(
     tenantId: str, subjectId: str,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     summary = await get_audit_summary(audit, tenantId, subjectId)
     return ok(summary)
@@ -380,7 +380,7 @@ async def tenant_findings(
     result:   str | None = None,
     severity: str | None = None,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     rows = (
         await audit.execute(
@@ -407,7 +407,7 @@ async def rule_readiness(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     from verigence.audit.application.context_builder import build_audit_context  # noqa: PLC0415
     from verigence.audit.application.evaluator import evaluate_rule, load_rules  # noqa: PLC0415
     require_tenant(tenantId, principal)
@@ -431,7 +431,7 @@ async def cross_case_scan(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     summary = await run_cross_case_scan(di, audit, tenantId)
     return ok({
@@ -446,7 +446,7 @@ async def cross_case_findings(
     tenantId: str,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     rows = (
         await audit.execute(
@@ -473,7 +473,7 @@ async def ack_finding(
     body: AcknowledgeRequest,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     await acknowledge_finding(
         audit, tenantId, findingId,
@@ -489,10 +489,11 @@ async def bulk_ack(
     body: BulkAcknowledgeRequest,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
+    finding_ids: list[UUID | str] = list(body.findingIds)
     await bulk_acknowledge(
-        audit, tenantId, body.findingIds,
+        audit, tenantId, finding_ids,
         actor_id=principal.actor_id,
         note=body.note, waive=body.waive,
     )
@@ -505,7 +506,7 @@ async def pending_acks(
     principal: Auth,
     severity: str | None = None,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     findings = await get_pending_acknowledgements(audit, tenantId, severity=severity)
     return ok({"pending": findings})
@@ -519,7 +520,7 @@ async def create_audit_rule(
     body: RuleCreate,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
 
     existing = (
@@ -576,7 +577,7 @@ async def list_audit_rules(
     tenantId: str,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     rows = (
         await audit.execute(
@@ -596,7 +597,7 @@ async def tenant_rule_readiness(
     tenantId: str,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     rows = (
         await audit.execute(
@@ -617,7 +618,7 @@ async def update_rule_config(
     body: RuleConfigUpdate,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     if body.threshold is not None:
         await audit.execute(
@@ -638,7 +639,7 @@ async def re_evaluate_rule(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     from verigence.audit.application.context_builder import build_audit_context  # noqa: PLC0415
     from verigence.audit.application.evaluator import evaluate_rule, load_rules  # noqa: PLC0415
     require_tenant(tenantId, principal)
