@@ -8,32 +8,27 @@ version = "0.1.0"
 description = "Verigence Price Anomaly Rule Engine — audit service"
 requires-python = ">=3.12"
 dependencies = [
-    # Web framework
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.30.0",
     "python-multipart>=0.0.9",
-
-    # Data validation
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",
-
-    # Database
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29.0",
     "psycopg2-binary>=2.9.12",
     "alembic>=1.13.0",
-
-    # Auth — Security-issued JWT verification
     "python-jose[cryptography]>=3.3.0",
     "httpx>=0.27.0",
-
-    # Scheduling
     "apscheduler>=3.10.0",
-
-    # Utilities
     "python-dateutil>=2.9.0",
     "structlog>=24.1.0",
     "tenacity>=8.3.0",
+    "opentelemetry-api==1.44.0",
+    "opentelemetry-sdk==1.44.0",
+    "opentelemetry-exporter-otlp-proto-http==1.44.0",
+    "opentelemetry-instrumentation-fastapi==0.65b0",
+    "opentelemetry-instrumentation-httpx==0.65b0",
+    "opentelemetry-instrumentation-sqlalchemy==0.65b0",
 ]
 
 [project.optional-dependencies]
@@ -60,16 +55,16 @@ src = ["src"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "TCH"]
 ignore = [
-    "E501",    # line too long — handled by formatter
-    "B008",    # Depends() in function defaults — idiomatic FastAPI pattern
-    "TC001",   # move app import into TYPE_CHECKING — breaks Pydantic runtime validation
-    "TC002",   # move third-party import into TYPE_CHECKING — breaks FastAPI/SQLAlchemy runtime use
-    "TC003",   # move stdlib import into TYPE_CHECKING — breaks Pydantic/FastAPI runtime annotation
-    "F841",    # local variable assigned but never used — we clean these up manually
-    "UP042",   # prefer StrEnum — str+Enum is required for Pydantic v2 serialization compat
-    "UP046",   # use type parameters — Generic[T] required for Pydantic v2 generic model compat
-    "UP007",   # use X|Y union — keep Union for clarity in complex storage type hints
-    "UP035",   # AsyncIterator from collections.abc — keep typing import for now
+    "E501",
+    "B008",
+    "TC001",
+    "TC002",
+    "TC003",
+    "F841",
+    "UP042",
+    "UP046",
+    "UP007",
+    "UP035",
 ]
 
 [tool.mypy]
@@ -81,10 +76,6 @@ plugins = ["pydantic.mypy"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-# Ratchet floor. Repo-wide coverage is ~60% — api/v1, scheduler and auth are
-# not yet covered. Raise this toward 70 as those packages get tests; never
-# lower it. (Scaffolded at 70; CI had been red on this gate since 2026-08-23,
-# floor was effectively 58.)
 addopts = "--cov=src --cov-report=term-missing --cov-fail-under=58"
 
 [tool.coverage.run]
