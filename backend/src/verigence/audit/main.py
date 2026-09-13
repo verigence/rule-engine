@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -68,7 +69,9 @@ def _error_contract(status_code: int, correlation_id: str) -> dict[str, Any]:
     }
 
 
-def _safe_validation_issues(errors: list[dict[str, Any]]) -> list[dict[str, str]]:
+def _safe_validation_issues(
+    errors: Sequence[Mapping[str, Any]],
+) -> list[dict[str, str]]:
     issues: list[dict[str, str]] = []
     for error in errors:
         location = ".".join(str(part) for part in error.get("loc", ()))
@@ -88,7 +91,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
 
     @asynccontextmanager
-    async def lifespan(fastapi_app: FastAPI):  # type: ignore[arg-type]
+    async def lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
         del fastapi_app
         from verigence.audit.scheduler.batch import get_batch_scheduler  # noqa: PLC0415
 
@@ -127,7 +130,7 @@ def create_app() -> FastAPI:
         traces_enabled=observability_state.traces_enabled,
     )
 
-    def custom_openapi() -> dict:  # type: ignore[return]
+    def custom_openapi() -> dict[str, Any]:
         if app.openapi_schema:
             return app.openapi_schema
         from fastapi.openapi.utils import get_openapi  # noqa: PLC0415
@@ -214,7 +217,10 @@ def create_app() -> FastAPI:
         )
 
     @app.middleware("http")
-    async def correlation_middleware(request: Request, call_next) -> Response:  # type: ignore[type-arg]
+    async def correlation_middleware(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
         incoming = request.headers.get(CORRELATION_ID_HEADER, "")
         correlation_id = (
             incoming if incoming and _is_valid_correlation_id(incoming) else str(uuid.uuid4())
@@ -288,7 +294,7 @@ def create_app() -> FastAPI:
 
     if settings.sentry_dsn:
         try:
-            import sentry_sdk  # type: ignore[import]
+            import sentry_sdk
 
             sentry_sdk.init(
                 dsn=settings.sentry_dsn,
