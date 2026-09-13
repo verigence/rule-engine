@@ -1,26 +1,28 @@
-"""audit.py — All 20 public audit endpoints.
+"""audit.py — All 21 public audit endpoints.
 
 Group A  — Phase-scoped evaluation (7 routes): sync, returns anomalies[] immediately
 Group B  — Full audit + run history (2 routes)
 Group C  — Findings query, summary, readiness (4 routes)
 Group D  — Cross-case scan + findings (2 routes)
 Group E  — Acknowledgement (3 routes)
-Group F  — Rule management (4 routes, including re-evaluate)
+Group F  — Rule management (5 routes: create, list, readiness, config update, re-evaluate)
 
 All routes require a valid Bearer JWT (see auth/jwt.py).
 Tenant in JWT must match tenantId path parameter.
 """
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationInfo, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from verigence.audit.api.schemas import ok
+from verigence.audit.application.condition_parser import validate_condition
 from verigence.audit.application.cross_case_engine import run_cross_case_scan
 from verigence.audit.application.evaluator import run_audit
 from verigence.audit.auth.jwt import Principal, get_principal, require_tenant
@@ -74,6 +76,95 @@ class BulkAcknowledgeRequest(BaseModel):
 class RuleConfigUpdate(BaseModel):
     threshold: float | None = None
     enabled:   bool  | None = None
+
+
+# audit.audit_rules' own CHECK constraints (migration 0001_audit_engine.py) --
+# validated here too so a bad value 422s at creation time instead of either
+# a raw DB constraint-violation 500, or (for phases, which has no DB CHECK at
+# all) silently persisting a rule that can never be evaluated because
+# evaluator.py/phase_router.py don't recognize the phase name.
+_VALID_AUDIT_SCOPES  = {"WITHIN_CASE", "CROSS_CASE"}
+_VALID_COMPARATORS   = {
+    "ABS_DIFF_GT", "NOT_EQ", "GT", "LT", "EQ", "DATE_BEFORE",
+    "DATE_DIFF_GT", "RATIO_LT", "FIELD_EMPTY", "CROSS_DOC_SUM_GT",
+}
+_VALID_SEVERITIES    = {"CRITICAL", "WARNING", "INFO"}
+_VALID_AGGREGATIONS  = {"SINGLE", "SUM", "MAX", "MIN", "COUNT"}
+_VALID_PHASES        = {"BOOKING", "DELIVERY", "FINANCE", "EXCHANGE", "CORPORATE", "FULL"}
+
+
+class RuleCreate(BaseModel):
+    ruleCode:            str
+    category:            str
+    auditScope:          str = "WITHIN_CASE"
+    phases:              list[str] = ["FULL"]  # noqa: RUF012
+    leftDocType:         str | None = None
+    leftFieldKey:        str | None = None
+    leftAggregation:     str = "SINGLE"
+    rightDocType:        str | None = None
+    rightFieldKey:       str | None = None
+    rightAggregation:    str = "SINGLE"
+    rightConfigKey:      str | None = None
+    comparator:          str
+    threshold:           float = 0
+    severity:            str
+    findingMessage:      str
+    conditionExpression: str | None = None
+    requiresBothDocs:    bool = False
+    enabled:             bool = True
+
+    @field_validator("ruleCode", "category", "findingMessage")
+    @classmethod
+    def _not_blank(cls, v: str, info: ValidationInfo) -> str:
+        if not v or not v.strip():
+            raise ValueError(f"{info.field_name} must not be blank")
+        return v.strip()
+
+    @field_validator("auditScope")
+    @classmethod
+    def _valid_audit_scope(cls, v: str) -> str:
+        if v not in _VALID_AUDIT_SCOPES:
+            raise ValueError(f"auditScope must be one of {sorted(_VALID_AUDIT_SCOPES)}")
+        return v
+
+    @field_validator("comparator")
+    @classmethod
+    def _valid_comparator(cls, v: str) -> str:
+        if v not in _VALID_COMPARATORS:
+            raise ValueError(f"comparator must be one of {sorted(_VALID_COMPARATORS)}")
+        return v
+
+    @field_validator("severity")
+    @classmethod
+    def _valid_severity(cls, v: str) -> str:
+        if v not in _VALID_SEVERITIES:
+            raise ValueError(f"severity must be one of {sorted(_VALID_SEVERITIES)}")
+        return v
+
+    @field_validator("leftAggregation", "rightAggregation")
+    @classmethod
+    def _valid_aggregation(cls, v: str, info: ValidationInfo) -> str:
+        if v not in _VALID_AGGREGATIONS:
+            raise ValueError(f"{info.field_name} must be one of {sorted(_VALID_AGGREGATIONS)}")
+        return v
+
+    @field_validator("phases")
+    @classmethod
+    def _valid_phases(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("phases must not be empty")
+        unknown = [p for p in v if p not in _VALID_PHASES]
+        if unknown:
+            raise ValueError(f"unknown phase(s) {unknown} -- must be one of {sorted(_VALID_PHASES)}")
+        return v
+
+    @field_validator("conditionExpression")
+    @classmethod
+    def _valid_condition_expression(cls, v: str | None) -> str | None:
+        errors = validate_condition(v)
+        if errors:
+            raise ValueError("; ".join(errors))
+        return v
 
 
 # ── Internal helper ────────────────────────────────────────────────────────────────
@@ -146,7 +237,7 @@ async def audit_booking(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["BOOKING"])
     return ok({**data, "phase": "BOOKING"})
@@ -159,7 +250,7 @@ async def audit_delivery(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["DELIVERY"])
     return ok({**data, "phase": "DELIVERY"})
@@ -172,7 +263,7 @@ async def audit_finance(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["FINANCE"])
     return ok({**data, "phase": "FINANCE"})
@@ -185,7 +276,7 @@ async def audit_exchange(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["EXCHANGE"])
     return ok({**data, "phase": "EXCHANGE"})
@@ -198,7 +289,7 @@ async def audit_corporate(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["CORPORATE"])
     return ok({**data, "phase": "CORPORATE"})
@@ -211,7 +302,7 @@ async def audit_by_category(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId)
     data["anomalies"] = [a for a in data["anomalies"] if a["category"] in body.categories]
@@ -225,7 +316,7 @@ async def audit_by_documents(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId)
     return ok(data)
@@ -239,7 +330,7 @@ async def full_audit(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     data = await _run_and_persist(di, audit, tenantId, subjectId)
     return ok(data)
@@ -250,7 +341,7 @@ async def get_audit_runs(
     tenantId: str, subjectId: str,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     runs = await list_runs(audit, tenantId, subjectId)
     return ok({"runs": runs})
@@ -265,7 +356,7 @@ async def subject_findings(
     result:   str | None = None,
     severity: str | None = None,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     findings = await get_findings(audit, tenantId, subjectId, result=result, severity=severity)
     return ok({"findings": findings})
@@ -276,7 +367,7 @@ async def subject_summary(
     tenantId: str, subjectId: str,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     summary = await get_audit_summary(audit, tenantId, subjectId)
     return ok(summary)
@@ -289,7 +380,7 @@ async def tenant_findings(
     result:   str | None = None,
     severity: str | None = None,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     rows = (
         await audit.execute(
@@ -316,7 +407,7 @@ async def rule_readiness(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     from verigence.audit.application.context_builder import build_audit_context  # noqa: PLC0415
     from verigence.audit.application.evaluator import evaluate_rule, load_rules  # noqa: PLC0415
     require_tenant(tenantId, principal)
@@ -340,7 +431,7 @@ async def cross_case_scan(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     summary = await run_cross_case_scan(di, audit, tenantId)
     return ok({
@@ -355,7 +446,7 @@ async def cross_case_findings(
     tenantId: str,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     rows = (
         await audit.execute(
@@ -382,7 +473,7 @@ async def ack_finding(
     body: AcknowledgeRequest,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     await acknowledge_finding(
         audit, tenantId, findingId,
@@ -398,10 +489,11 @@ async def bulk_ack(
     body: BulkAcknowledgeRequest,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
+    finding_ids: list[UUID | str] = list(body.findingIds)
     await bulk_acknowledge(
-        audit, tenantId, body.findingIds,
+        audit, tenantId, finding_ids,
         actor_id=principal.actor_id,
         note=body.note, waive=body.waive,
     )
@@ -414,20 +506,78 @@ async def pending_acks(
     principal: Auth,
     severity: str | None = None,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     findings = await get_pending_acknowledgements(audit, tenantId, severity=severity)
     return ok({"pending": findings})
 
 
-# ── Group F: Rule management (4 routes) ───────────────────────────────────────────
+# ── Group F: Rule management (5 routes) ───────────────────────────────────────────
+
+@router.post("/audit/rules", status_code=201)
+async def create_audit_rule(
+    tenantId: str,
+    body: RuleCreate,
+    principal: Auth,
+    audit: AsyncSession = Depends(get_audit_session),
+) -> dict[str, Any]:
+    require_tenant(tenantId, principal)
+
+    existing = (
+        await audit.execute(
+            text("SELECT 1 FROM audit.audit_rules WHERE rule_code = :rc"),
+            {"rc": body.ruleCode},
+        )
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Rule {body.ruleCode!r} already exists")
+
+    await audit.execute(
+        text("""
+            INSERT INTO audit.audit_rules (
+                rule_code, category, audit_scope, phases,
+                left_doc_type, left_field_key, left_aggregation,
+                right_doc_type, right_field_key, right_aggregation, right_config_key,
+                comparator, threshold, severity, finding_message,
+                condition_expression, requires_both_docs, enabled
+            ) VALUES (
+                :rule_code, :category, :audit_scope, :phases::jsonb,
+                :left_doc_type, :left_field_key, :left_aggregation,
+                :right_doc_type, :right_field_key, :right_aggregation, :right_config_key,
+                :comparator, :threshold, :severity, :finding_message,
+                :condition_expression, :requires_both_docs, :enabled
+            )
+        """),
+        {
+            "rule_code": body.ruleCode,
+            "category": body.category,
+            "audit_scope": body.auditScope,
+            "phases": json.dumps(body.phases),
+            "left_doc_type": body.leftDocType,
+            "left_field_key": body.leftFieldKey,
+            "left_aggregation": body.leftAggregation,
+            "right_doc_type": body.rightDocType,
+            "right_field_key": body.rightFieldKey,
+            "right_aggregation": body.rightAggregation,
+            "right_config_key": body.rightConfigKey,
+            "comparator": body.comparator,
+            "threshold": body.threshold,
+            "severity": body.severity,
+            "finding_message": body.findingMessage,
+            "condition_expression": body.conditionExpression,
+            "requires_both_docs": body.requiresBothDocs,
+            "enabled": body.enabled,
+        },
+    )
+    return ok({"created": body.ruleCode})
+
 
 @router.get("/audit/rules")
 async def list_audit_rules(
     tenantId: str,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     rows = (
         await audit.execute(
@@ -447,7 +597,7 @@ async def tenant_rule_readiness(
     tenantId: str,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     rows = (
         await audit.execute(
@@ -468,7 +618,7 @@ async def update_rule_config(
     body: RuleConfigUpdate,
     principal: Auth,
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     require_tenant(tenantId, principal)
     if body.threshold is not None:
         await audit.execute(
@@ -489,7 +639,7 @@ async def re_evaluate_rule(
     principal: Auth,
     di:    AsyncSession = Depends(get_di_session),
     audit: AsyncSession = Depends(get_audit_session),
-) -> dict:
+) -> dict[str, Any]:
     from verigence.audit.application.context_builder import build_audit_context  # noqa: PLC0415
     from verigence.audit.application.evaluator import evaluate_rule, load_rules  # noqa: PLC0415
     require_tenant(tenantId, principal)
