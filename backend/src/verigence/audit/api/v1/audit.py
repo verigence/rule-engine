@@ -1,26 +1,28 @@
-"""audit.py — All 20 public audit endpoints.
+"""audit.py — All 21 public audit endpoints.
 
 Group A  — Phase-scoped evaluation (7 routes): sync, returns anomalies[] immediately
 Group B  — Full audit + run history (2 routes)
 Group C  — Findings query, summary, readiness (4 routes)
 Group D  — Cross-case scan + findings (2 routes)
 Group E  — Acknowledgement (3 routes)
-Group F  — Rule management (4 routes, including re-evaluate)
+Group F  — Rule management (5 routes: create, list, readiness, config update, re-evaluate)
 
 All routes require a valid Bearer JWT (see auth/jwt.py).
 Tenant in JWT must match tenantId path parameter.
 """
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationInfo, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from verigence.audit.api.schemas import ok
+from verigence.audit.application.condition_parser import validate_condition
 from verigence.audit.application.cross_case_engine import run_cross_case_scan
 from verigence.audit.application.evaluator import run_audit
 from verigence.audit.auth.jwt import Principal, get_principal, require_tenant
@@ -74,6 +76,95 @@ class BulkAcknowledgeRequest(BaseModel):
 class RuleConfigUpdate(BaseModel):
     threshold: float | None = None
     enabled:   bool  | None = None
+
+
+# audit.audit_rules' own CHECK constraints (migration 0001_audit_engine.py) --
+# validated here too so a bad value 422s at creation time instead of either
+# a raw DB constraint-violation 500, or (for phases, which has no DB CHECK at
+# all) silently persisting a rule that can never be evaluated because
+# evaluator.py/phase_router.py don't recognize the phase name.
+_VALID_AUDIT_SCOPES  = {"WITHIN_CASE", "CROSS_CASE"}
+_VALID_COMPARATORS   = {
+    "ABS_DIFF_GT", "NOT_EQ", "GT", "LT", "EQ", "DATE_BEFORE",
+    "DATE_DIFF_GT", "RATIO_LT", "FIELD_EMPTY", "CROSS_DOC_SUM_GT",
+}
+_VALID_SEVERITIES    = {"CRITICAL", "WARNING", "INFO"}
+_VALID_AGGREGATIONS  = {"SINGLE", "SUM", "MAX", "MIN", "COUNT"}
+_VALID_PHASES        = {"BOOKING", "DELIVERY", "FINANCE", "EXCHANGE", "CORPORATE", "FULL"}
+
+
+class RuleCreate(BaseModel):
+    ruleCode:            str
+    category:            str
+    auditScope:          str = "WITHIN_CASE"
+    phases:              list[str] = ["FULL"]  # noqa: RUF012
+    leftDocType:         str | None = None
+    leftFieldKey:        str | None = None
+    leftAggregation:     str = "SINGLE"
+    rightDocType:        str | None = None
+    rightFieldKey:       str | None = None
+    rightAggregation:    str = "SINGLE"
+    rightConfigKey:      str | None = None
+    comparator:          str
+    threshold:           float = 0
+    severity:            str
+    findingMessage:      str
+    conditionExpression: str | None = None
+    requiresBothDocs:    bool = False
+    enabled:             bool = True
+
+    @field_validator("ruleCode", "category", "findingMessage")
+    @classmethod
+    def _not_blank(cls, v: str, info: ValidationInfo) -> str:
+        if not v or not v.strip():
+            raise ValueError(f"{info.field_name} must not be blank")
+        return v.strip()
+
+    @field_validator("auditScope")
+    @classmethod
+    def _valid_audit_scope(cls, v: str) -> str:
+        if v not in _VALID_AUDIT_SCOPES:
+            raise ValueError(f"auditScope must be one of {sorted(_VALID_AUDIT_SCOPES)}")
+        return v
+
+    @field_validator("comparator")
+    @classmethod
+    def _valid_comparator(cls, v: str) -> str:
+        if v not in _VALID_COMPARATORS:
+            raise ValueError(f"comparator must be one of {sorted(_VALID_COMPARATORS)}")
+        return v
+
+    @field_validator("severity")
+    @classmethod
+    def _valid_severity(cls, v: str) -> str:
+        if v not in _VALID_SEVERITIES:
+            raise ValueError(f"severity must be one of {sorted(_VALID_SEVERITIES)}")
+        return v
+
+    @field_validator("leftAggregation", "rightAggregation")
+    @classmethod
+    def _valid_aggregation(cls, v: str, info: ValidationInfo) -> str:
+        if v not in _VALID_AGGREGATIONS:
+            raise ValueError(f"{info.field_name} must be one of {sorted(_VALID_AGGREGATIONS)}")
+        return v
+
+    @field_validator("phases")
+    @classmethod
+    def _valid_phases(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("phases must not be empty")
+        unknown = [p for p in v if p not in _VALID_PHASES]
+        if unknown:
+            raise ValueError(f"unknown phase(s) {unknown} -- must be one of {sorted(_VALID_PHASES)}")
+        return v
+
+    @field_validator("conditionExpression")
+    @classmethod
+    def _valid_condition_expression(cls, v: str | None) -> str | None:
+        errors = validate_condition(v)
+        if errors:
+            raise ValueError("; ".join(errors))
+        return v
 
 
 # ── Internal helper ────────────────────────────────────────────────────────────────
@@ -420,7 +511,65 @@ async def pending_acks(
     return ok({"pending": findings})
 
 
-# ── Group F: Rule management (4 routes) ───────────────────────────────────────────
+# ── Group F: Rule management (5 routes) ───────────────────────────────────────────
+
+@router.post("/audit/rules", status_code=201)
+async def create_audit_rule(
+    tenantId: str,
+    body: RuleCreate,
+    principal: Auth,
+    audit: AsyncSession = Depends(get_audit_session),
+) -> dict:
+    require_tenant(tenantId, principal)
+
+    existing = (
+        await audit.execute(
+            text("SELECT 1 FROM audit.audit_rules WHERE rule_code = :rc"),
+            {"rc": body.ruleCode},
+        )
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Rule {body.ruleCode!r} already exists")
+
+    await audit.execute(
+        text("""
+            INSERT INTO audit.audit_rules (
+                rule_code, category, audit_scope, phases,
+                left_doc_type, left_field_key, left_aggregation,
+                right_doc_type, right_field_key, right_aggregation, right_config_key,
+                comparator, threshold, severity, finding_message,
+                condition_expression, requires_both_docs, enabled
+            ) VALUES (
+                :rule_code, :category, :audit_scope, :phases::jsonb,
+                :left_doc_type, :left_field_key, :left_aggregation,
+                :right_doc_type, :right_field_key, :right_aggregation, :right_config_key,
+                :comparator, :threshold, :severity, :finding_message,
+                :condition_expression, :requires_both_docs, :enabled
+            )
+        """),
+        {
+            "rule_code": body.ruleCode,
+            "category": body.category,
+            "audit_scope": body.auditScope,
+            "phases": json.dumps(body.phases),
+            "left_doc_type": body.leftDocType,
+            "left_field_key": body.leftFieldKey,
+            "left_aggregation": body.leftAggregation,
+            "right_doc_type": body.rightDocType,
+            "right_field_key": body.rightFieldKey,
+            "right_aggregation": body.rightAggregation,
+            "right_config_key": body.rightConfigKey,
+            "comparator": body.comparator,
+            "threshold": body.threshold,
+            "severity": body.severity,
+            "finding_message": body.findingMessage,
+            "condition_expression": body.conditionExpression,
+            "requires_both_docs": body.requiresBothDocs,
+            "enabled": body.enabled,
+        },
+    )
+    return ok({"created": body.ruleCode})
+
 
 @router.get("/audit/rules")
 async def list_audit_rules(

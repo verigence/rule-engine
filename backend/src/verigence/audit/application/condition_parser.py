@@ -65,6 +65,67 @@ def _eval_atom(token: str, context: AuditContext) -> bool:
     return False
 
 
+_KNOWN_ATOM_PREFIXES = ("doc_present:", "doc_absent:", "field_gt:")
+
+
+def _validate_atom(token: str) -> str | None:
+    """Return an error message for one atom, or None if it's well-formed."""
+    token = token.strip()
+    if not token:
+        return "empty atom"
+    if not token.startswith(_KNOWN_ATOM_PREFIXES):
+        return f"unrecognized atom {token!r} (expected doc_present:/doc_absent:/field_gt:)"
+
+    if token.startswith("field_gt:"):
+        rest = token[len("field_gt:"):]
+        parts = rest.rsplit(":", 1)
+        if len(parts) != 2:
+            return f"malformed field_gt atom {token!r} (expected field_gt:<doc_type>.<field_key>:<threshold>)"
+        doc_field, threshold_str = parts
+        if "." not in doc_field:
+            return f"malformed field_gt atom {token!r} (expected <doc_type>.<field_key> before the threshold)"
+        try:
+            float(threshold_str)
+        except ValueError:
+            return f"field_gt atom {token!r} has a non-numeric threshold {threshold_str!r}"
+        doc_type, field_key = doc_field.split(".", 1)
+        if not doc_type or not field_key:
+            return f"malformed field_gt atom {token!r} (doc_type and field_key must both be non-empty)"
+    else:
+        # doc_present:/doc_absent: — everything after the prefix is the doc_type key.
+        doc_type = token.split(":", 1)[1].strip()
+        if not doc_type:
+            return f"malformed atom {token!r} (missing doc_type after the prefix)"
+
+    return None
+
+
+def validate_condition(expr: str | None) -> list[str]:
+    """
+    Validate a condition_expression string against the DSL grammar (module
+    docstring), without evaluating it against any real context.
+
+    Returns a list of human-readable error messages -- empty means valid.
+    An empty/None expression is valid (no precondition).
+    """
+    if not expr or not expr.strip():
+        return []
+
+    expr = expr.strip()
+    if " AND " in expr and " OR " in expr:
+        return ["condition_expression cannot mix AND and OR -- use only one connective"]
+
+    if " AND " in expr:
+        atoms = expr.split(" AND ")
+    elif " OR " in expr:
+        atoms = expr.split(" OR ")
+    else:
+        atoms = [expr]
+
+    errors = [error for atom in atoms if (error := _validate_atom(atom)) is not None]
+    return errors
+
+
 def evaluate_condition(expr: str, context: AuditContext) -> bool:
     """
     Evaluate a condition_expression string against an AuditContext.
