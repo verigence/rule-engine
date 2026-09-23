@@ -18,13 +18,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 _BAD_PATTERN = re.compile(r":[a-zA-Z_][a-zA-Z0-9_]*::")
 _SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 
 
-@pytest.mark.no_docker
 def test_no_source_file_binds_a_named_parameter_directly_into_a_pg_cast() -> None:
     offenders: list[str] = []
     for path in _SRC_ROOT.rglob("*.py"):
@@ -39,5 +36,5 @@ def test_no_source_file_binds_a_named_parameter_directly_into_a_pg_cast() -> Non
         "Found `:name::type` -- SQLAlchemy's text() bind-parameter parser does not "
         "recognize a name immediately followed by `::` and silently leaves it as "
         "literal text, which asyncpg then rejects. Use CAST(:name AS type) instead. "
-        f"Offending lines:\n" + "\n".join(offenders)
+        "Offending lines:\n" + "\n".join(offenders)
     )
