@@ -65,7 +65,7 @@ async def complete_run(
                 warning_fail     = :warning,
                 info_fail        = :info,
                 verdict          = :verdict,
-                skipped_detail   = :detail::jsonb,
+                skipped_detail   = CAST(:detail AS jsonb),
                 completed_at_utc = :now
             WHERE audit_run_id = :run_id
         """),
