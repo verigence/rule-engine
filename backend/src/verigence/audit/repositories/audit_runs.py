@@ -4,7 +4,7 @@ All SQL via text() — no ORM.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -65,7 +65,7 @@ async def complete_run(
                 warning_fail     = :warning,
                 info_fail        = :info,
                 verdict          = :verdict,
-                skipped_detail   = :detail::jsonb,
+                skipped_detail   = CAST(:detail AS jsonb),
                 completed_at_utc = :now
             WHERE audit_run_id = :run_id
         """),
@@ -79,7 +79,7 @@ async def complete_run(
             "info":     summary.info_fail,
             "verdict":  summary.verdict,
             "detail":   json.dumps(summary.skipped_reasons),
-            "now":      datetime.now(timezone.utc),
+            "now":      datetime.now(UTC),
             "run_id":   str(run_id),
         },
     )

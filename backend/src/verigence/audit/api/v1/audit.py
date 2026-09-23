@@ -541,7 +541,7 @@ async def create_audit_rule(
                 comparator, threshold, severity, finding_message,
                 condition_expression, requires_both_docs, enabled
             ) VALUES (
-                :rule_code, :category, :audit_scope, :phases::jsonb,
+                :rule_code, :category, :audit_scope, CAST(:phases AS jsonb),
                 :left_doc_type, :left_field_key, :left_aggregation,
                 :right_doc_type, :right_field_key, :right_aggregation, :right_config_key,
                 :comparator, :threshold, :severity, :finding_message,
