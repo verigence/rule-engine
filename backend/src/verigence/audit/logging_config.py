@@ -36,7 +36,7 @@ import structlog
 _AXIOM_INGEST_URL = "https://api.axiom.co/v1/datasets/{dataset}/ingest"
 
 # ── Axiom drain singleton ─────────────────────────────────────────────────────
-_axiom_drain: "_AxiomDrain | None" = None
+_axiom_drain: _AxiomDrain | None = None
 
 
 class _AxiomDrain:
