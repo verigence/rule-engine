@@ -33,7 +33,7 @@ def _get_audit_factory() -> async_sessionmaker[AsyncSession]:
             pool_pre_ping=True,
             pool_size=5,
             max_overflow=10,
-            echo=not settings.is_production,
+            echo=settings.sql_echo,
         )
         _audit_factory = async_sessionmaker(
             _audit_engine,
@@ -58,7 +58,7 @@ def _get_di_factory() -> async_sessionmaker[AsyncSession]:
             pool_pre_ping=True,
             pool_size=3,
             max_overflow=5,
-            echo=not settings.is_production,
+            echo=settings.sql_echo,
             execution_options={"postgresql_readonly": True},
         )
         _di_factory = async_sessionmaker(

@@ -234,10 +234,15 @@ def configure_logging() -> None:
         force=True,
     )
 
-    # Silence noisy libraries in production
+    # Silence noisy libraries. The SQLAlchemy engine logger is quiet in every
+    # environment unless statement echo was asked for (AUDIT_SQL_ECHO): with
+    # it at INFO, DEV logged every statement and its parameters, which is
+    # both slow and unreadable. The other libraries stay verbose only in dev.
+    quiet = ["sqlalchemy.engine"] if not settings.sql_echo else []
     if not is_dev:
-        for noisy in ("sqlalchemy.engine", "httpx", "httpcore", "apscheduler"):
-            logging.getLogger(noisy).setLevel(logging.WARNING)
+        quiet += ["httpx", "httpcore", "apscheduler"]
+    for noisy in quiet:
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     structlog.get_logger(__name__).info(
         "logging_configured",

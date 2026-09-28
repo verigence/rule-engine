@@ -33,6 +33,14 @@ class Settings(BaseSettings):
 
     # Logging — mirrors DI D27 pattern
     log_level: str = "INFO"               # DEBUG | INFO | WARNING | ERROR
+    # SQLAlchemy statement echo (AUDIT_SQL_ECHO). Off by default in EVERY
+    # environment: it used to follow "not production", which made the DEV
+    # service log every statement with its parameters through the
+    # sqlalchemy.engine INFO logger. Confirmed on the DEV Railway logs on
+    # 2026-09-28 (rule evaluation calls of 3.8-6.2 s from the P2 worker,
+    # each surrounded by pages of echoed SQL). Opt in explicitly when
+    # debugging a query.
+    sql_echo: bool = False
     log_stdout: bool = True                # emit structured logs to stdout
     log_axiom: bool = False                # emit logs to Axiom (async, fire-and-forget)
     axiom_token: str = ""                  # Axiom API token (required if log_axiom=true)
