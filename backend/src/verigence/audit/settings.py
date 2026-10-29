@@ -58,7 +58,10 @@ class Settings(BaseSettings):
     # Webhook security
     webhook_secret: str = ""  # X-Webhook-Secret header value (AUDIT_WEBHOOK_SECRET)
 
-    # Nightly batch scheduler
+    # Nightly batch scheduler. Off by default (product owner 2026-10-29):
+    # Audit Core is the only trigger and the only findings ledger; this
+    # service is asked per journey. AUDIT_BATCH_ENABLED=true turns it back on.
+    batch_enabled: bool = False
     batch_hour: int = 2  # UTC hour to run nightly batch (AUDIT_BATCH_HOUR)
 
     # Sentry
