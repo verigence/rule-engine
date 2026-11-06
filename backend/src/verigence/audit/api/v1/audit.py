@@ -16,6 +16,7 @@ import json
 from typing import Annotated, Any
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ValidationInfo, field_validator
 from sqlalchemy import text
@@ -43,8 +44,10 @@ from verigence.audit.repositories.database import (
     get_audit_session,
     get_di_session,
 )
+from verigence.audit.repositories.run_dedup import find_unchanged_run
 
 router = APIRouter(prefix="/v1/tenants/{tenantId}", tags=["audit"])
+logger = structlog.get_logger(__name__)
 
 # Reusable type alias for the auth dependency
 Auth = Annotated[Principal, Depends(get_principal)]
@@ -177,25 +180,46 @@ async def _run_and_persist(
     trigger_mode: str = "ON_DEMAND",
     phases: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run a full (or phase-filtered) audit, persist results, return API-ready dict."""
-    run_id = await create_run(
-        audit_session,
-        tenant_id=tenant_id,
-        subject_id=UUID(subject_id),
-        scope="WITHIN_CASE",
-        trigger_mode=trigger_mode,
-    )
+    """Run a full (or phase-filtered) audit, persist results, return API-ready dict.
+
+    Writes only when the result changed (2026-11-07, run churn): when an
+    earlier run already recorded exactly this result and the subject's current
+    findings still hold it (see repositories/run_dedup.py for the rule),
+    nothing is inserted or superseded and the response carries that run's id.
+    The response is otherwise built from this evaluation, as before.
+    """
     summary = await run_audit(
         di_session, audit_session,
         tenant_id=tenant_id,
         subject_id=UUID(subject_id),
         phases=phases,
     )
-    summary.audit_run_id = run_id
-    await persist_findings(
-        audit_session, tenant_id, UUID(subject_id), run_id, summary.findings
+    unchanged_run_id = await find_unchanged_run(
+        audit_session, tenant_id, UUID(subject_id), summary, scope="WITHIN_CASE"
     )
-    await complete_run(audit_session, run_id, summary)
+    if unchanged_run_id is not None:
+        run_id = unchanged_run_id
+        summary.audit_run_id = run_id
+        logger.info(
+            "audit_run_unchanged",
+            tenant_id=tenant_id,
+            subject_id=subject_id,
+            phases=phases,
+            audit_run_id=str(run_id),
+        )
+    else:
+        run_id = await create_run(
+            audit_session,
+            tenant_id=tenant_id,
+            subject_id=UUID(subject_id),
+            scope="WITHIN_CASE",
+            trigger_mode=trigger_mode,
+        )
+        summary.audit_run_id = run_id
+        await persist_findings(
+            audit_session, tenant_id, UUID(subject_id), run_id, summary.findings
+        )
+        await complete_run(audit_session, run_id, summary)
 
     return {
         "auditRunId": str(run_id),
