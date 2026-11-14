@@ -346,13 +346,14 @@ async def run_audit(
     subject_id: UUID | str,
     phases: list[str] | None = None,
     config_overrides: dict[str, Any] | None = None,
+    documents: list[dict[str, Any]] | None = None,
 ) -> AuditRunSummary:
     """
     Full within-case audit for one subject.
     Returns AuditRunSummary with findings[] populated.
     Does NOT persist — caller is responsible for persistence.
     """
-    context = await build_audit_context(di_session, tenant_id, subject_id, config_overrides)
+    context = await build_audit_context(di_session, tenant_id, subject_id, config_overrides, documents=documents)
     rules   = await load_rules(audit_session, scope="WITHIN_CASE", phases=phases)
 
     findings:        list[AuditFinding]  = []
