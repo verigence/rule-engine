@@ -55,9 +55,23 @@ Auth = Annotated[Principal, Depends(get_principal)]
 
 # ── Request bodies ────────────────────────────────────────────────────────────────
 
+class ProvidedDocument(BaseModel):
+    """One document of the case as Audit Core holds it: its type as Audit Core
+    knows it and its fields with the people's corrections applied."""
+    documentId:      str
+    documentTypeKey: str
+    fields:          dict[str, Any] = {}
+
+
 class PhaseAuditRequest(BaseModel):
     includeSkipped: bool = False
     failFast:       bool = False
+    # The case's documents as Audit Core holds them (2026-11-14). When given,
+    # the rules read these instead of Document Intelligence's index: a value a
+    # person corrected in Audit Core, or a document Audit Core took off the
+    # case, otherwise never reached the rules ("why despite changing the date
+    # tasks are not getting closed"). Absent: the index, as before.
+    documents:      list[ProvidedDocument] | None = None
 
 class ByCategoryRequest(BaseModel):
     categories:     list[str]
@@ -179,6 +193,7 @@ async def _run_and_persist(
     subject_id: str,
     trigger_mode: str = "ON_DEMAND",
     phases: list[str] | None = None,
+    documents: list[ProvidedDocument] | None = None,
 ) -> dict[str, Any]:
     """Run a full (or phase-filtered) audit, persist results, return API-ready dict.
 
@@ -193,6 +208,7 @@ async def _run_and_persist(
         tenant_id=tenant_id,
         subject_id=UUID(subject_id),
         phases=phases,
+        documents=None if documents is None else [d.model_dump() for d in documents],
     )
     unchanged_run_id = await find_unchanged_run(
         audit_session, tenant_id, UUID(subject_id), summary, scope="WITHIN_CASE"
@@ -263,7 +279,7 @@ async def audit_booking(
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict[str, Any]:
     require_tenant(tenantId, principal)
-    data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["BOOKING"])
+    data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["BOOKING"], documents=body.documents)
     return ok({**data, "phase": "BOOKING"})
 
 
@@ -276,7 +292,7 @@ async def audit_delivery(
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict[str, Any]:
     require_tenant(tenantId, principal)
-    data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["DELIVERY"])
+    data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["DELIVERY"], documents=body.documents)
     return ok({**data, "phase": "DELIVERY"})
 
 
@@ -289,7 +305,7 @@ async def audit_finance(
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict[str, Any]:
     require_tenant(tenantId, principal)
-    data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["FINANCE"])
+    data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["FINANCE"], documents=body.documents)
     return ok({**data, "phase": "FINANCE"})
 
 
@@ -302,7 +318,7 @@ async def audit_exchange(
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict[str, Any]:
     require_tenant(tenantId, principal)
-    data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["EXCHANGE"])
+    data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["EXCHANGE"], documents=body.documents)
     return ok({**data, "phase": "EXCHANGE"})
 
 
@@ -315,7 +331,7 @@ async def audit_corporate(
     audit: AsyncSession = Depends(get_audit_session),
 ) -> dict[str, Any]:
     require_tenant(tenantId, principal)
-    data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["CORPORATE"])
+    data = await _run_and_persist(di, audit, tenantId, subjectId, phases=["CORPORATE"], documents=body.documents)
     return ok({**data, "phase": "CORPORATE"})
 
 

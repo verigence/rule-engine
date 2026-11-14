@@ -208,6 +208,7 @@ async def build_audit_context(
     tenant_id: str,
     subject_id: UUID | str,
     config_overrides: dict[str, Any] | None = None,
+    documents: list[dict[str, Any]] | None = None,
 ) -> AuditContext:
     """
     Load all confirmed documents for a subject from docintel.document_search_index
@@ -215,7 +216,31 @@ async def build_audit_context(
 
     indexed_fields is read as a plain dict — no canonical_fields queries.
     Absent key → None → comparator returns SKIPPED.
+
+    ``documents`` (2026-11-14): the case's documents as Audit Core holds them
+    (``documentId``, ``documentTypeKey``, ``fields``) -- its document types,
+    the values people corrected, only the documents on the case. Given, they
+    are the case; the index is not read.
     """
+    if documents is not None:
+        provided = [
+            DocumentContext(
+                document_id=UUID(str(d["documentId"])),
+                document_type_key=str(d["documentTypeKey"]),
+                indexed_fields=dict(d.get("fields") or {}),
+            )
+            for d in documents
+        ]
+        config_given: dict[str, Any] = dict(DEFAULT_CONFIG)
+        if config_overrides:
+            config_given.update(config_overrides)
+        return AuditContext(
+            tenant_id=str(tenant_id),
+            subject_id=UUID(str(subject_id)),
+            documents=provided,
+            config=config_given,
+            reconciliation=await _load_reconciliation(di_session, tenant_id, subject_id),
+        )
     rows = (
         await di_session.execute(
             text("""
@@ -230,7 +255,7 @@ async def build_audit_context(
         )
     ).mappings().all()
 
-    documents = [
+    indexed = [
         DocumentContext(
             document_id=UUID(str(row["document_id"])),
             document_type_key=row["document_type_key"],
@@ -248,7 +273,7 @@ async def build_audit_context(
     return AuditContext(
         tenant_id=str(tenant_id),
         subject_id=UUID(str(subject_id)),
-        documents=documents,
+        documents=indexed,
         config=config,
         reconciliation=reconciliation,
     )

@@ -149,3 +149,40 @@ def test_first_doc_of_type_found():
 def test_first_doc_of_type_not_found():
     doc = DocumentContext(document_id=uuid4(), document_type_key="booking_docket", indexed_fields={})
     assert first_doc_of_type([doc], "gate_pass") is None
+
+
+# ── documents given by Audit Core (2026-11-14) ─────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_documents_given_by_audit_core_are_the_case(mock_di_session, monkeypatch):
+    """A gate pass whose delivery date was misread 2023-11-13 and corrected in
+    Audit Core to 2026-11-13: the rules read the corrected value Audit Core
+    gives, not the index; the index is not queried for documents."""
+    from verigence.audit.application import context_builder
+
+    async def _no_reconciliation(*_args, **_kwargs):
+        return {"commercial": {"x": 1}}
+
+    monkeypatch.setattr(context_builder, "_load_reconciliation", _no_reconciliation)
+    gate = uuid4()
+    ctx = await build_audit_context(
+        mock_di_session, TENANT, SUBJECT,
+        documents=[{"documentId": str(gate), "documentTypeKey": "gate_pass",
+                    "fields": {"delivery_date": "2026-11-13"}}],
+    )
+    assert [(d.document_id, d.document_type_key, d.indexed_fields) for d in ctx.documents] == [
+        (gate, "gate_pass", {"delivery_date": "2026-11-13"})]
+    assert ctx.reconciliation == {"commercial": {"x": 1}}
+    mock_di_session.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_an_empty_list_given_is_a_case_with_no_documents(mock_di_session, monkeypatch):
+    from verigence.audit.application import context_builder
+
+    async def _no_reconciliation(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(context_builder, "_load_reconciliation", _no_reconciliation)
+    ctx = await build_audit_context(mock_di_session, TENANT, SUBJECT, documents=[])
+    assert ctx.documents == []
